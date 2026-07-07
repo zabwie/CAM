@@ -4,6 +4,7 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { z } from "zod";
 import * as db from "./db.js";
+import * as bus from "./event-bus.js";
 import * as twin from "./services.js";
 import { config } from "./config.js";
 import { EventSchema } from "./types.js";
@@ -54,7 +55,7 @@ router.get("/events/:id", (req: Request, res: Response) => {
 router.post("/events", (req: Request, res: Response) => {
   const parsed = EventSchema.safeParse({ ...req.body, id: req.body.id || uuid() });
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-  db.insertEvent(parsed.data);
+  bus.publish(parsed.data);
   res.status(201).json(parsed.data);
 });
 
@@ -87,13 +88,15 @@ router.get("/analytics/compliance", (req: Request, res: Response) => {
 router.post("/ingest", (req: Request, res: Response) => {
   const { events } = req.body || {};
   if (!Array.isArray(events)) return res.status(400).json({ error: "events array required" });
+  let ingested = 0;
   for (const e of events) {
     const parsed = EventSchema.safeParse({ ...e, id: e.id || uuid() });
     if (parsed.success) {
-      db.insertEvent(parsed.data);
+      bus.publish(parsed.data);
+      ingested++;
     }
   }
-  res.status(201).json({ ingested: events.length });
+  res.status(201).json({ ingested });
 });
 
 // ── Devices ──

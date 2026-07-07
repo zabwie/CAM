@@ -17,6 +17,7 @@ export function startIngestion(): void {
 // Writes every event + vehicle to the database.
 export function startPersistence(): void {
   bus.subscribe((event) => {
+    if (event.type === "alert") return; // alerts are stored separately
     try {
       db.insertEvent(event);
     } catch (err) {
@@ -113,7 +114,7 @@ export function startAlerts(): void {
         created_at: Date.now(),
       };
       db.insertAlert(alert);
-      bus.publish({ ...event, type: "alert", plugin_id: "alerts", metadata: alert as any } as any);
+      bus.publish({ id: uuid(), ts: Date.now() * 1_000_000, device_id: event.device_id, type: "alert", plugin_id: "alerts", severity: 0, confidence: 1, source: 0, metadata: alert as any });
     }
   });
   console.log("[alerts] started");
