@@ -66,8 +66,8 @@ class Detection:
     class_name: str
     confidence: float
     bbox: tuple          # x1, y1, x2, y2
-    speed: Optional[float]   # in the engine's active unit (mph or kmh)
-    speed_unit: str
+    speed: Optional[float]   # speed value
+    speed_unit: str          # "mph", "km/h", or "px/s"
     is_violation: bool
 
 
@@ -76,7 +76,6 @@ class Detection:
 # ---------------------------------------------------------------------------
 
 VEHICLE_IDS = {2, 3, 5, 7}       # car, motorcycle, bus, truck (COCO)
-SPEED_BUFFER_FRAMES = 15          # ~0.5 s at 30 fps (legacy homography)
 
 
 class TrafficEngine:
@@ -110,9 +109,8 @@ class TrafficEngine:
         )
 
         # Per-track history
-        self._pos_buffer: dict[int, list] = {}   # track_id -> [(frame, x_world, y_world)]
         self._prev_pos: dict[int, tuple] = {}    # track_id -> (cx, cy) previous frame
-        self._trap_state: dict[int, dict] = {}   # track_id -> {"la": frame, "lb": frame, "fired": bool}
+        self._speed_buf: dict[int, list] = {}    # track_id -> [px/s, ...] rolling window
 
         self.results: list[Detection] = []
         self.frame_count = 0
@@ -166,28 +164,24 @@ class TrafficEngine:
             label = yolo_out.names.get(cls_id, "?")
             cx, cy = (x1 + x2) // 2, y2
 
-            # Speed: try speed trap first, fall back to homography
-            speed = self._speed_trap(tid, cx, cy)
-            if speed is None:
-                speed = self._estimate_speed(tid, cx, cy)
-
+            speed, unit = self._compute_speed(tid, cx, cy)
             speed_display = speed
-            violation = speed_display is not None and speed_display > self.speed_limit
+            violation = speed_display is not None and unit != "px/s" and speed_display > self.speed_limit
 
             self.results.append(Detection(
                 frame=self.frame_count, track_id=tid,
                 class_name=label, confidence=conf,
                 bbox=(x1, y1, x2, y2), speed=speed_display,
-                speed_unit=self.speed_unit, is_violation=violation,
+                speed_unit=unit if unit else "px/s",
+                is_violation=violation,
             ))
 
             colour = (0, 0, 255) if violation else (0, 255, 0)
             cv2.rectangle(annotated, (x1, y1), (x2, y2), colour, 2)
 
-            unit_label = "mph" if self.speed_unit == "mph" else "km/h"
             text = f"#{tid} {label}"
             if speed_display is not None:
-                text += f" {speed_display:.0f} {unit_label}"
+                text += f" {speed_display:.0f} {unit}"
             cv2.putText(annotated, text, (x1, y1 - 8),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, colour, 2)
 
@@ -251,73 +245,20 @@ class TrafficEngine:
 
     def results_csv(self, path: str | Path):
         import csv
-        unit = self.speed_unit
         with open(path, "w", newline="") as f:
             w = csv.writer(f)
             w.writerow(["frame", "track_id", "class", "confidence",
-                         "x1", "y1", "x2", "y2", f"speed_{unit}", "violation"])
+                         "x1", "y1", "x2", "y2", "speed", "unit", "violation"])
             for d in self.results:
                 w.writerow([
                     d.frame, d.track_id, d.class_name,
                     f"{d.confidence:.3f}", *d.bbox,
                     f"{d.speed:.1f}" if d.speed is not None else "",
+                    d.speed_unit if d.speed_unit else "",
                     "YES" if d.is_violation else "",
                 ])
 
-    # ---- speed trap (line-crossing) ---------------------------------------
-
-    def _line_side(self, p1, p2, p):
-        """Cross product sign: which side of the line (p1->p2) is point p on?"""
-        return (p2[0] - p1[0]) * (p[1] - p1[1]) - (p2[1] - p1[1]) * (p[0] - p1[0])
-
-    def _crossed_line(self, prev, curr, line_p1, line_p2):
-        """Did the point cross the line between prev and curr frames?"""
-        s1 = self._line_side(line_p1, line_p2, prev)
-        s2 = self._line_side(line_p1, line_p2, curr)
-        return (s1 > 0) != (s2 > 0)  # sign changed (ignore exactly-on-line cases)
-
-    def _speed_trap(self, track_id: int, cx: int, cy: int) -> Optional[float]:
-        """Check speed trap crossing -> speed in active unit, or None."""
-        if not (self.cal and self.cal.speed_trap):
-            return None
-
-        st = self.cal.speed_trap
-        line_a = st.get("line_a")
-        line_b = st.get("line_b")
-        dist_m = st.get("distance_m", 10.0)
-        if not (line_a and line_b and dist_m > 0):
-            return None
-
-        prev = self._prev_pos.get(track_id)
-        self._prev_pos[track_id] = (cx, cy)
-        if prev is None:
-            return None
-
-        state = self._trap_state.setdefault(track_id, {"la": None, "lb": None, "fired": False})
-        if state["fired"]:
-            return None
-
-        # Check both lines
-        if state["la"] is None and self._crossed_line(prev, (cx, cy), *line_a):
-            state["la"] = self.frame_count
-        if state["lb"] is None and self._crossed_line(prev, (cx, cy), *line_b):
-            state["lb"] = self.frame_count
-
-        # If both crossed, compute speed
-        if state["la"] is not None and state["lb"] is not None:
-            state["fired"] = True
-            dt = abs(state["la"] - state["lb"]) / self.fps
-            if dt <= 0:
-                return None
-            speed_ms = dist_m / dt
-            if self.speed_unit == "mph":
-                return speed_ms * 2.23694   # m/s -> mph
-            else:
-                return speed_ms * 3.6       # m/s -> km/h
-
-        return None
-
-    # ---- homography speed (fallback) --------------------------------------
+    # ---- continuous pixel speed -------------------------------------------
 
     def _image_to_world(self, u: float, v: float) -> Optional[tuple[float, float]]:
         if self.cal is None or self.cal.H is None:
@@ -327,45 +268,65 @@ class TrafficEngine:
             return None
         return (float(p[0] / p[2]), float(p[1] / p[2]))
 
-    def _estimate_speed(self, track_id: int, u: int, v: int) -> Optional[float]:
-        """Per-frame homography-based speed (km/h). Converted to active unit."""
-        if self.cal is None or self.cal.H is None:
-            return None
-        world = self._image_to_world(u, v)
-        if world is None:
-            return None
+    def _compute_speed(self, track_id: int, cx: int, cy: int) -> tuple:
+        """Per-frame pixel speed, optionally converted to real-world speed.
 
-        buf = self._pos_buffer.setdefault(track_id, [])
-        buf.append((self.frame_count, *world))
-        if len(buf) > SPEED_BUFFER_FRAMES:
+        Returns (speed_value, unit_label).
+        unit_label is "mph"/"km/h" if homography available, "px/s" otherwise.
+        """
+        prev = self._prev_pos.get(track_id)
+        self._prev_pos[track_id] = (cx, cy)
+        if prev is None:
+            return None, None
+
+        # Instantaneous pixel speed
+        dist_px = np.hypot(cx - prev[0], cy - prev[1])
+        inst_px_s = dist_px * self.fps
+
+        # Smooth over rolling window
+        buf = self._speed_buf.setdefault(track_id, [])
+        buf.append(inst_px_s)
+        if len(buf) > 5:
             buf.pop(0)
-        if len(buf) < 5:
-            return None
+        if len(buf) < 3:
+            return None, None
 
-        t0, x0, y0 = buf[0]
-        t1, x1, y1 = buf[-1]
-        dt = (t1 - t0) / self.fps
-        if dt <= 0:
-            return None
-        dist = np.hypot(x1 - x0, y1 - y0)
-        speed_ms = dist / dt
-        if self.speed_unit == "mph":
-            return speed_ms * 2.23694
-        return speed_ms * 3.6
+        avg_px_s = sum(buf) / len(buf)
+
+        # Real-world speed if homography available
+        if self.cal and self.cal.H is not None:
+            wc = self._image_to_world(cx, cy)
+            wp = self._image_to_world(prev[0], prev[1])
+            if wc and wp:
+                dist_m = np.hypot(wc[0] - wp[0], wc[1] - wp[1])
+                speed_ms = dist_m * self.fps
+                if self.speed_unit == "mph":
+                    return speed_ms * 2.23694, "mph"
+                return speed_ms * 3.6, "km/h"
+
+        # Pixel speed fallback
+        return avg_px_s, "px/s"
 
     # ---- summary ----------------------------------------------------------
 
     def _summary(self) -> dict:
-        speeds = [d.speed for d in self.results if d.speed is not None]
+        speeds = [(d.speed, d.speed_unit) for d in self.results if d.speed is not None]
         violations = sum(1 for d in self.results if d.is_violation)
         tracks = set(d.track_id for d in self.results)
+
+        from collections import Counter
+        unit_counts = Counter(u for _, u in speeds)
+        dominant_unit = unit_counts.most_common(1)[0][0] if unit_counts else self.speed_unit
+        values = [s for s, u in speeds if u == dominant_unit] if dominant_unit != "px/s" else [s for s, u in speeds]
+
         return dict(
             frames_processed=self.frame_count,
             unique_vehicles=len(tracks),
             total_detections=len(self.results),
             violations=violations,
-            avg_speed=round(float(np.mean(speeds)), 1) if speeds else 0.0,
-            max_speed=round(float(max(speeds)), 1) if speeds else 0.0,
+            speed_coverage=f"{len(speeds)}/{len(self.results)}",
+            avg_speed=round(float(np.mean(values)), 1) if values else 0.0,
+            max_speed=round(float(max(values)), 1) if values else 0.0,
             speed_limit=self.speed_limit,
-            speed_unit=self.speed_unit,
+            speed_unit=dominant_unit,
         )
