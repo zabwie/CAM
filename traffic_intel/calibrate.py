@@ -41,8 +41,51 @@ def _show_image(img, title) -> tuple:
 
 
 # ---------------------------------------------------------------------------
-# Step 1: Homography
+# Step 1: Quick reference distance
 # ---------------------------------------------------------------------------
+
+def _click_reference(img_rgb):
+    """Click 2 points a known distance apart (e.g. a lane marking)."""
+    pts = []
+
+    def onclick(event):
+        if event.inaxes is None or len(pts) >= 2:
+            return
+        if event.button != 1:
+            return
+        pts.append((int(event.xdata), int(event.ydata)))
+        ax.plot(event.xdata, event.ydata, "go", markersize=8)
+        if len(pts) == 2:
+            xs, ys = zip(*pts)
+            ax.plot(xs, ys, "g-", linewidth=2)
+            d = np.hypot(pts[1][0] - pts[0][0], pts[1][1] - pts[0][1])
+            ax.text((xs[0]+xs[1])//2, (ys[0]+ys[1])//2 - 10,
+                    f"{d:.0f} px", fontsize=11, color="green", fontweight="bold")
+            plt.draw()
+            plt.pause(0.3)
+            plt.close()
+
+    fig, ax = _show_image(img_rgb,
+        "STEP 1: Click two points on a known-length object\n"
+        "e.g. a lane marking (standard 10ft / 3m), crosswalk, or any feature\n"
+        "Close window to skip (will use px/s fallback).")
+    fig.canvas.mpl_connect("button_press_event", onclick)
+    plt.show()
+
+    if len(pts) < 2:
+        print("  No reference distance set. Will use px/s fallback.")
+        return None, None
+
+    px_dist = np.hypot(pts[1][0] - pts[0][0], pts[1][1] - pts[0][1])
+    print(f"\n  Reference: {px_dist:.0f} pixels between clicked points.")
+    try:
+        real_dist = float(input("  Real-world distance (feet): ") or "10")
+    except (ValueError, EOFError):
+        real_dist = 10.0
+        print(f"  Using default: {real_dist} ft")
+
+    # Store in metres internally
+    return px_dist, real_dist * 0.3048
 
 def _click_homography(img_rgb):
     """Click 4 points TL/TR/BR/BL. Return list of (u,v) or None."""
@@ -183,24 +226,34 @@ def calibrate_from_image(image_path: str | Path) -> dict | None:
 
     calib = {}
 
-    # --- Step 1: Homography ---
-    print("\n=== STEP 1: Homography calibration ===")
-    result = _click_homography(img)
-    if result is None:
-        return None
-    H, w_m, h_m, pts_uv = result
-    calib["H"] = H
-    calib["width_m"] = w_m
-    calib["length_m"] = h_m
-    calib["points_uv"] = pts_uv
+    # --- Step 1: Quick reference distance ---
+    print("\n=== STEP 1: Reference distance (click 2 points) ===")
+    ref_px, ref_m = _click_reference(img)
+    if ref_px:
+        calib["ref_distance_px"] = ref_px
+        calib["ref_distance_m"] = ref_m
+        calib["speed_unit"] = "mph"
 
-    # --- Step 2: ROI polygon ---
-    print("\n=== STEP 2: ROI polygon (optional) ===")
+    # --- Step 2: Homography ---
+    print("\n=== STEP 2: Homography calibration (optional) ===")
+    result = _click_homography(img)
+    if result is None or result[0] is None:
+        print("  Homography skipped.")
+    else:
+        H, w_m, h_m, pts_uv = result
+        calib["H"] = H
+        calib["width_m"] = w_m
+        calib["length_m"] = h_m
+        calib["points_uv"] = pts_uv
+        calib["speed_unit"] = "mph"
+
+    # --- Step 3: ROI polygon ---
+    print("\n=== STEP 3: ROI polygon (optional) ===")
     roi = _click_roi(img)
     calib["roi_polygon"] = roi
 
-    # --- Step 3: Speed trap lines ---
-    print("\n=== STEP 3: Speed trap lines (optional) ===")
+    # --- Step 4: Speed trap lines ---
+    print("\n=== STEP 4: Speed trap lines (optional) ===")
     line_a = _click_line(img, "A (first  line, upstream)", "cyan")
     line_b = _click_line(img, "B (second line, downstream)", "magenta")
 

@@ -24,14 +24,16 @@ from ultralytics import YOLO
 
 @dataclass
 class Calibration:
-    """Camera calibration for ROI, homography, and speed trap."""
+    """Camera calibration for ROI, homography, or simple reference distance."""
     H: Optional[np.ndarray] = None       # 3x3 homography (image -> ground plane)
     width_m: float = 3.7                 # road width perpendicular to traffic
     length_m: float = 10.0               # road length along traffic
     points_uv: list = None               # 4 homography calibration points
     roi_polygon: Optional[list] = None   # [[x,y], ...] drivable area
-    speed_trap: Optional[dict] = None    # {"line_a": [[x1,y1],[x2,y2]], "line_b": ..., "distance_m": float}
-    speed_unit: str = "mph"              # "mph" or "kmh"
+    speed_trap: Optional[dict] = None    # {"line_a": ..., "line_b": ..., "distance_m": float}
+    speed_unit: str = "mph"              # "mph" or "km/h"
+    ref_distance_px: Optional[float] = None  # pixel length of known reference
+    ref_distance_m: Optional[float] = None   # real-world length of same reference
 
     def save(self, path: str | Path):
         data = dict(
@@ -41,6 +43,8 @@ class Calibration:
             roi_polygon=self.roi_polygon or [],
             speed_trap=self.speed_trap,
             speed_unit=self.speed_unit,
+            ref_distance_px=self.ref_distance_px,
+            ref_distance_m=self.ref_distance_m,
         )
         Path(path).write_text(json.dumps(data, indent=2))
 
@@ -55,6 +59,8 @@ class Calibration:
             roi_polygon=data.get("roi_polygon"),
             speed_trap=data.get("speed_trap"),
             speed_unit=data.get("speed_unit", "mph"),
+            ref_distance_px=data.get("ref_distance_px"),
+            ref_distance_m=data.get("ref_distance_m"),
         )
 
 
@@ -269,21 +275,14 @@ class TrafficEngine:
         return (float(p[0] / p[2]), float(p[1] / p[2]))
 
     def _compute_speed(self, track_id: int, cx: int, cy: int) -> tuple:
-        """Per-frame pixel speed, optionally converted to real-world speed.
-
-        Returns (speed_value, unit_label).
-        unit_label is "mph"/"km/h" if homography available, "px/s" otherwise.
-        """
         prev = self._prev_pos.get(track_id)
         self._prev_pos[track_id] = (cx, cy)
         if prev is None:
             return None, None
 
-        # Instantaneous pixel speed
         dist_px = np.hypot(cx - prev[0], cy - prev[1])
         inst_px_s = dist_px * self.fps
 
-        # Smooth over rolling window
         buf = self._speed_buf.setdefault(track_id, [])
         buf.append(inst_px_s)
         if len(buf) > 5:
@@ -293,7 +292,6 @@ class TrafficEngine:
 
         avg_px_s = sum(buf) / len(buf)
 
-        # Real-world speed if homography available
         if self.cal and self.cal.H is not None:
             wc = self._image_to_world(cx, cy)
             wp = self._image_to_world(prev[0], prev[1])
@@ -304,7 +302,13 @@ class TrafficEngine:
                     return speed_ms * 2.23694, "mph"
                 return speed_ms * 3.6, "km/h"
 
-        # Pixel speed fallback
+        if self.cal and self.cal.ref_distance_px and self.cal.ref_distance_m:
+            meters_per_pixel = self.cal.ref_distance_m / self.cal.ref_distance_px
+            speed_ms = avg_px_s * meters_per_pixel
+            if self.speed_unit == "mph":
+                return speed_ms * 2.23694, "mph"
+            return speed_ms * 3.6, "km/h"
+
         return avg_px_s, "px/s"
 
     # ---- summary ----------------------------------------------------------
