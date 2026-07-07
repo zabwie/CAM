@@ -44,8 +44,8 @@ def _show_image(img, title) -> tuple:
 # Step 1: Quick reference distance
 # ---------------------------------------------------------------------------
 
-def _click_reference(img_rgb):
-    """Click 2 points a known distance apart (e.g. a lane marking)."""
+def _click_reference(img_rgb, prompt_label="first", default_ft=10):
+    """Click 2 points a known distance apart. Returns (px_dist, real_dist_m, center_y) or None."""
     pts = []
 
     def onclick(event):
@@ -66,26 +66,25 @@ def _click_reference(img_rgb):
             plt.close()
 
     fig, ax = _show_image(img_rgb,
-        "STEP 1: Click two points on a known-length object\n"
-        "e.g. a lane marking (standard 10ft / 3m), crosswalk, or any feature\n"
+        f"STEP 1{': ' + prompt_label if prompt_label != 'first' else ''}: Click 2 points on a known-length object\n"
+        f"e.g. a lane marking (standard {default_ft}ft / {default_ft*0.3048:.0f}m), crosswalk, or any feature\n"
         "Close window to skip (will use px/s fallback).")
     fig.canvas.mpl_connect("button_press_event", onclick)
     plt.show()
 
     if len(pts) < 2:
-        print("  No reference distance set. Will use px/s fallback.")
-        return None, None
+        print(f"  No reference distance set.")
+        return None
 
     px_dist = np.hypot(pts[1][0] - pts[0][0], pts[1][1] - pts[0][1])
-    print(f"\n  Reference: {px_dist:.0f} pixels between clicked points.")
+    center_y = (pts[0][1] + pts[1][1]) // 2
+    print(f"\n  Reference: {px_dist:.0f} pixels at y={center_y}.")
     try:
-        real_dist = float(input("  Real-world distance (feet): ") or "10")
+        real_dist = float(input(f"  Real-world distance (feet, default={default_ft}): ") or str(default_ft))
     except (ValueError, EOFError):
-        real_dist = 10.0
+        real_dist = float(default_ft)
         print(f"  Using default: {real_dist} ft")
-
-    # Store in metres internally
-    return px_dist, real_dist * 0.3048
+    return px_dist, real_dist * 0.3048, center_y
 
 def _click_homography(img_rgb):
     """Click 4 points TL/TR/BR/BL. Return list of (u,v) or None."""
@@ -228,11 +227,21 @@ def calibrate_from_image(image_path: str | Path) -> dict | None:
 
     # --- Step 1: Quick reference distance ---
     print("\n=== STEP 1: Reference distance (click 2 points) ===")
-    ref_px, ref_m = _click_reference(img)
-    if ref_px:
-        calib["ref_distance_px"] = ref_px
-        calib["ref_distance_m"] = ref_m
+    ref = _click_reference(img, prompt_label="first (near the camera)", default_ft=10)
+    if ref:
+        px, real_m, cy = ref
+        calib["ref_near"] = {"px": px, "m": real_m, "y": cy}
+        calib["ref_distance_px"] = px
+        calib["ref_distance_m"] = real_m
         calib["speed_unit"] = "mph"
+        # Ask for a second reference at a different depth for perspective correction
+        print("\n  Optionally add a second reference at a FARTHER distance")
+        print("  (same object type, further from camera — this corrects perspective)")
+        ref2 = _click_reference(img, prompt_label="second (far from camera)", default_ft=10)
+        if ref2:
+            px2, real_m2, cy2 = ref2
+            calib["ref_far"] = {"px": px2, "m": real_m2, "y": cy2}
+            print(f"  Perspective correction: near at y={cy}, far at y={cy2}")
 
     # --- Step 2: Homography ---
     print("\n=== STEP 2: Homography calibration (optional) ===")

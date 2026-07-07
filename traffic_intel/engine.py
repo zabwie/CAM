@@ -32,8 +32,10 @@ class Calibration:
     roi_polygon: Optional[list] = None   # [[x,y], ...] drivable area
     speed_trap: Optional[dict] = None    # {"line_a": ..., "line_b": ..., "distance_m": float}
     speed_unit: str = "mph"              # "mph" or "km/h"
-    ref_distance_px: Optional[float] = None  # pixel length of known reference
-    ref_distance_m: Optional[float] = None   # real-world length of same reference
+    ref_distance_px: Optional[float] = None  # single reference (legacy)
+    ref_distance_m: Optional[float] = None
+    ref_near: Optional[dict] = None  # {"px": float, "m": float, "y": int}  near = bigger in frame
+    ref_far: Optional[dict] = None   # {"px": float, "m": float, "y": int}  far = smaller in frame
 
     def save(self, path: str | Path):
         data = dict(
@@ -45,6 +47,8 @@ class Calibration:
             speed_unit=self.speed_unit,
             ref_distance_px=self.ref_distance_px,
             ref_distance_m=self.ref_distance_m,
+            ref_near=self.ref_near,
+            ref_far=self.ref_far,
         )
         Path(path).write_text(json.dumps(data, indent=2))
 
@@ -61,6 +65,8 @@ class Calibration:
             speed_unit=data.get("speed_unit", "mph"),
             ref_distance_px=data.get("ref_distance_px"),
             ref_distance_m=data.get("ref_distance_m"),
+            ref_near=data.get("ref_near"),
+            ref_far=data.get("ref_far"),
         )
 
 
@@ -301,6 +307,22 @@ class TrafficEngine:
                 if self.speed_unit == "mph":
                     return speed_ms * 2.23694, "mph"
                 return speed_ms * 3.6, "km/h"
+
+        # Interpolated reference: two depths correct for perspective
+        if self.cal and self.cal.ref_near and self.cal.ref_far:
+            n, f = self.cal.ref_near, self.cal.ref_far
+            if n["y"] != f["y"]:
+                t = (cy - f["y"]) / (n["y"] - f["y"])
+                t = max(0.0, min(1.0, t))
+            else:
+                t = 0.5
+            mpp_n = n["m"] / n["px"]
+            mpp_f = f["m"] / f["px"]
+            m_per_pixel = mpp_f + t * (mpp_n - mpp_f)
+            speed_ms = avg_px_s * m_per_pixel
+            if self.speed_unit == "mph":
+                return speed_ms * 2.23694, "mph"
+            return speed_ms * 3.6, "km/h"
 
         if self.cal and self.cal.ref_distance_px and self.cal.ref_distance_m:
             meters_per_pixel = self.cal.ref_distance_m / self.cal.ref_distance_px
