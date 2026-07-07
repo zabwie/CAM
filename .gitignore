@@ -1,0 +1,43 @@
+# C++
+edge/build/
+edge/CMakeUserPresets.json
+*.o
+*.a
+*.so
+*.dylib
+
+# Node / TypeScript
+server/node_modules/
+server/dist/
+web/node_modules/
+web/dist/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# ML models (too large for git)
+edge/models/*.onnx
+edge/models/*.engine
+edge/models/*.pt
+!edge/models/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+docker-compose.override.yml
+
+# Video test data
+*.mp4
+*.avi
+*.h264
+!testdata/*.mp4
