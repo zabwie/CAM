@@ -1,14 +1,21 @@
 """
-Interactive camera calibrator.
-
-Steps (each opens its own matplotlib window):
-  1. Homography — click 4 road points that form a rectangle
-  2. ROI polygon — click points around the drivable area (right-click to close)
-  3. Speed trap — click 2 points for line A, 2 for line B; enter distance
+Interactive homography + ROI calibration wizard.
 
 Usage:
-    python calibrate.py --video traffic.mp4 --output calib.json
-    python calibrate.py --image frame.jpg --output calib.json
+    python3 traffic_intel/calibrate.py --image ref.jpg --output calib.json
+
+Click 4 road corners -> press 'h' -> bird's-eye preview -> 's' to save.
+World coords auto-assigned: odd-index clicks get x=lane-width, clicks 3+ get y=segment-length.
+Adjust defaults via --lane-width and --segment-length.
+
+Controls:
+  Left-click       Add point
+  Right-click      Remove last point
+  h                Compute homography + prompt for world coords
+  r                Toggle ROI / Homography mode
+  c                Clear points
+  s                Save to file
+  q                Quit
 """
 
 import argparse
@@ -16,315 +23,150 @@ import json
 from pathlib import Path
 
 import cv2
+import matplotlib
+matplotlib.use("gtk4agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.patches import Polygon
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _load_image(src: str | Path) -> np.ndarray | None:
-    img = cv2.imread(str(src))
-    if img is None:
-        print(f"ERROR: cannot read {src}")
-        return None
-    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
-
-def _show_image(img, title) -> tuple:
-    fig, ax = plt.subplots(figsize=(14, 10))
-    ax.imshow(img)
-    ax.set_title(title)
-    fig.tight_layout()
-    return fig, ax
-
-
-# ---------------------------------------------------------------------------
-# Step 1: Quick reference distance
-# ---------------------------------------------------------------------------
-
-def _click_reference(img_rgb, prompt_label="first", default_ft=10):
-    """Click 2 points a known distance apart. Returns (px_dist, real_dist_m, center_y) or None."""
-    pts = []
-
-    def onclick(event):
-        if event.inaxes is None or len(pts) >= 2:
-            return
-        if event.button != 1:
-            return
-        pts.append((int(event.xdata), int(event.ydata)))
-        ax.plot(event.xdata, event.ydata, "go", markersize=8)
-        if len(pts) == 2:
-            xs, ys = zip(*pts)
-            ax.plot(xs, ys, "g-", linewidth=2)
-            d = np.hypot(pts[1][0] - pts[0][0], pts[1][1] - pts[0][1])
-            ax.text((xs[0]+xs[1])//2, (ys[0]+ys[1])//2 - 10,
-                    f"{d:.0f} px", fontsize=11, color="green", fontweight="bold")
-            plt.draw()
-            plt.pause(0.3)
-            plt.close()
-
-    fig, ax = _show_image(img_rgb,
-        f"STEP 1{': ' + prompt_label if prompt_label != 'first' else ''}: Click 2 points on a known-length object\n"
-        f"e.g. a lane marking (standard {default_ft}ft / {default_ft*0.3048:.0f}m), crosswalk, or any feature\n"
-        "Close window to skip (will use px/s fallback).")
-    fig.canvas.mpl_connect("button_press_event", onclick)
-    plt.show()
-
-    if len(pts) < 2:
-        print(f"  No reference distance set.")
-        return None
-
-    px_dist = np.hypot(pts[1][0] - pts[0][0], pts[1][1] - pts[0][1])
-    center_y = (pts[0][1] + pts[1][1]) // 2
-    print(f"\n  Reference: {px_dist:.0f} pixels at y={center_y}.")
-    try:
-        real_dist = float(input(f"  Real-world distance (feet, default={default_ft}): ") or str(default_ft))
-    except (ValueError, EOFError):
-        real_dist = float(default_ft)
-        print(f"  Using default: {real_dist} ft")
-    return px_dist, real_dist * 0.3048, center_y
-
-def _click_homography(img_rgb):
-    """Click 4 points TL/TR/BR/BL. Return list of (u,v) or None."""
-    pts = []
-
-    def onclick(event):
-        if event.inaxes is None or len(pts) >= 4:
-            return
-        pts.append((int(event.xdata), int(event.ydata)))
-        ax.plot(event.xdata, event.ydata, "ro", markersize=6)
-        ax.text(event.xdata + 5, event.ydata - 5, str(len(pts)),
-                fontsize=12, color="red", fontweight="bold")
-        if len(pts) >= 2:
-            xs, ys = zip(*pts)
-            ax.plot(xs, ys, "r-", linewidth=1)
-        plt.draw()
-
-    fig, ax = _show_image(img_rgb,
-        "STEP 1: Click 4 road points forming a rectangle\n"
-        "Order: 1=Top-Left  2=Top-Right  3=Bottom-Right  4=Bottom-Left\n"
-        "Close window when done.")
-    fig.canvas.mpl_connect("button_press_event", onclick)
-    plt.show()
-
-    if len(pts) < 4:
-        print("Need exactly 4 points for homography. Skipping.")
-        return None, 0, 0
-
-    print(f"\nHomography points (image coords): {pts}")
-    try:
-        w = float(input("  Road WIDTH  (metres, perpendicular to traffic): ") or "3.7")
-        h = float(input("  Road LENGTH (metres, along traffic direction): ") or "10.0")
-    except (ValueError, EOFError):
-        w, h = 3.7, 10.0
-        print(f"  Using defaults: width={w}m, length={h}m")
-
-    world = np.array([[0, 0], [w, 0], [w, h], [0, h]], dtype=np.float32)
-    image = np.array(pts, dtype=np.float32)
-    H, _ = cv2.findHomography(image, world)
-
-    if H is None:
-        print("ERROR: homography computation failed.")
-        return None, 0, 0
-
-    print("  Projection check:")
-    for ip, wp in zip(pts, world):
-        p = H @ np.array([*ip, 1.0])
-        p = p[:2] / p[2]
-        print(f"    pixel {ip} -> {p[0]:.2f}, {p[1]:.2f} m  (expected {wp[0]:.1f}, {wp[1]:.1f} m)")
-    return H.tolist(), w, h, pts
-
-
-# ---------------------------------------------------------------------------
-# Step 2: ROI polygon
-# ---------------------------------------------------------------------------
-
-def _click_roi(img_rgb):
-    """Click N points around the drivable area. Right-click / key 'q' to close."""
-    pts = []
-
-    def onclick(event):
-        if event.inaxes is None:
-            return
-        if event.button == 3:  # right-click -> close polygon
-            plt.close()
-            return
-        if event.button != 1:
-            return
-        pts.append((int(event.xdata), int(event.ydata)))
-        ax.plot(event.xdata, event.ydata, "yo", markersize=5)
-        if len(pts) >= 2:
-            xs, ys = zip(*pts)
-            ax.plot(xs, ys, "y-", linewidth=1.5)
-        plt.draw()
-
-    def onkey(event):
-        if event.key == "q":
-            plt.close()
-
-    fig, ax = _show_image(img_rgb,
-        "STEP 2 (optional): Click points around the drivable road area\n"
-        "Left-click to add points, Right-click or press 'q' to close polygon\n"
-        "If you don't need an ROI, just close the window immediately.")
-    fig.canvas.mpl_connect("button_press_event", onclick)
-    fig.canvas.mpl_connect("key_press_event", onkey)
-    plt.show()
-
-    if len(pts) < 3:
-        print("  No ROI polygon defined (or fewer than 3 points). Skipping.")
-        return None
-
-    print(f"  ROI polygon: {len(pts)} points.")
-    return pts
-
-
-# ---------------------------------------------------------------------------
-# Step 3: Speed trap lines
-# ---------------------------------------------------------------------------
-
-def _click_line(img_rgb, label, colour):
-    """Click 2 points for a speed trap line. Return [(x1,y1),(x2,y2)] or None."""
-    pts = []
-
-    def onclick(event):
-        if event.inaxes is None or len(pts) >= 2:
-            return
-        if event.button != 1:
-            return
-        pts.append((int(event.xdata), int(event.ydata)))
-        ax.plot(event.xdata, event.ydata, "o", color=colour, markersize=7)
-        if len(pts) == 2:
-            xs, ys = zip(*pts)
-            ax.plot(xs, ys, "-", color=colour, linewidth=3)
-            plt.draw()
-            plt.pause(0.3)
-            plt.close()
-            return
-        plt.draw()
-
-    fig, ax = _show_image(img_rgb,
-        f"STEP 3: Click 2 points for speed trap {label}\n"
-        f"Line colour = {colour}. Click two endpoints.\n"
-        "Close window to skip.")
-    fig.canvas.mpl_connect("button_press_event", onclick)
-    plt.show()
-    return pts if len(pts) == 2 else None
-
-
-# ---------------------------------------------------------------------------
-# Orchestrator
-# ---------------------------------------------------------------------------
-
-def calibrate_from_image(image_path: str | Path) -> dict | None:
-    """Run all calibration steps and return combined dict."""
-    img = _load_image(image_path)
-    if img is None:
-        return None
-
-    calib = {}
-
-    # --- Step 1: Quick reference distance ---
-    print("\n=== STEP 1: Reference distance (click 2 points) ===")
-    ref = _click_reference(img, prompt_label="first (near the camera)", default_ft=10)
-    if ref:
-        px, real_m, cy = ref
-        calib["ref_near"] = {"px": px, "m": real_m, "y": cy}
-        calib["ref_distance_px"] = px
-        calib["ref_distance_m"] = real_m
-        calib["speed_unit"] = "mph"
-        # Ask for a second reference at a different depth for perspective correction
-        print("\n  Optionally add a second reference at a FARTHER distance")
-        print("  (same object type, further from camera — this corrects perspective)")
-        ref2 = _click_reference(img, prompt_label="second (far from camera)", default_ft=10)
-        if ref2:
-            px2, real_m2, cy2 = ref2
-            calib["ref_far"] = {"px": px2, "m": real_m2, "y": cy2}
-            print(f"  Perspective correction: near at y={cy}, far at y={cy2}")
-
-    # --- Step 2: Homography ---
-    print("\n=== STEP 2: Homography calibration (optional) ===")
-    result = _click_homography(img)
-    if result is None or result[0] is None:
-        print("  Homography skipped.")
-    else:
-        H, w_m, h_m, pts_uv = result
-        calib["H"] = H
-        calib["width_m"] = w_m
-        calib["length_m"] = h_m
-        calib["points_uv"] = pts_uv
-        calib["speed_unit"] = "mph"
-
-    # --- Step 3: ROI polygon ---
-    print("\n=== STEP 3: ROI polygon (optional) ===")
-    roi = _click_roi(img)
-    calib["roi_polygon"] = roi
-
-    # --- Step 4: Speed trap lines ---
-    print("\n=== STEP 4: Speed trap lines (optional) ===")
-    line_a = _click_line(img, "A (first  line, upstream)", "cyan")
-    line_b = _click_line(img, "B (second line, downstream)", "magenta")
-
-    trap = None
-    if line_a and line_b:
-        try:
-            d = float(input("  Distance between the two lines (metres): ") or "10.0")
-        except (ValueError, EOFError):
-            d = 10.0
-            print(f"  Using default: {d}m")
-        trap = {"line_a": line_a, "line_b": line_b, "distance_m": d}
-        print(f"  Speed trap: {d}m between lines, {len(line_a)} + {len(line_b)} points")
-    else:
-        print("  Speed trap skipped (need both lines).")
-
-    calib["speed_trap"] = trap
-    calib["speed_unit"] = "mph"
-
-    return calib
-
-
-def calibrate_from_video(video_path: str | Path, frame_offset: int = 0) -> dict | None:
-    """Grab a frame and run calibration."""
-    cap = cv2.VideoCapture(str(video_path))
-    for _ in range(frame_offset):
-        cap.read()
-    ret, frame = cap.read()
-    cap.release()
-    if not ret:
-        print(f"ERROR: cannot read frame {frame_offset}")
-        return None
-    tmp = Path("/tmp/_calib_frame.jpg")
-    cv2.imwrite(str(tmp), frame)
-    result = calibrate_from_image(tmp)
-    tmp.unlink(missing_ok=True)
-    return result
-
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
+LANE_WIDTH = 3.7
+SEGMENT_LEN = 25.0
 
 def main():
-    ap = argparse.ArgumentParser(description="Traffic camera calibrator")
-    ap.add_argument("--video", help="Path to traffic video")
-    ap.add_argument("--image", help="Path to reference image")
-    ap.add_argument("--output", "-o", default="calibration.json")
-    ap.add_argument("--frame", type=int, default=0,
-                    help="Frame offset in video to use as reference")
+    ap = argparse.ArgumentParser(description="Calibration wizard")
+    ap.add_argument("--image", required=True)
+    ap.add_argument("--output", default="calib.json")
+    ap.add_argument("--lane-width", type=float, default=LANE_WIDTH)
+    ap.add_argument("--segment-length", type=float, default=SEGMENT_LEN)
+    ap.add_argument("--pixels-per-meter", type=float, default=30,
+                    help="Output resolution for bird's-eye view (default: 30)")
     args = ap.parse_args()
 
-    if args.image:
-        calib = calibrate_from_image(args.image)
-    elif args.video:
-        calib = calibrate_from_video(args.video, args.frame)
-    else:
-        ap.print_help()
-        return
+    img_bgr = cv2.imread(args.image)
+    if img_bgr is None:
+        raise SystemExit(f"Cannot load {args.image}")
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
-    if calib:
-        Path(args.output).write_text(json.dumps(calib, indent=2))
-        print(f"\nCalibration saved to {args.output}")
+    fig, (ax_main, ax_bird) = plt.subplots(
+        1, 2, figsize=(14, 7), gridspec_kw={"width_ratios": [2, 1]},
+    )
+    ax_main.imshow(img_rgb)
+    ax_bird.set_title("Bird's-eye view")
+    fig.tight_layout()
+
+    h_pts: list = []
+    w_pts: list = []
+    roi_pts: list = []
+    roi_mode = False
+    H = None
+    warped_rgb = None
+
+    def redraw():
+        nonlocal H, warped_rgb
+        for l in ax_main.lines + ax_main.texts + list(ax_main.patches):
+            l.remove()
+        if len(roi_pts) > 2:
+            ax_main.add_patch(Polygon(roi_pts, fill=False, edgecolor="yellow", linewidth=2))
+        for p in roi_pts:
+            ax_main.plot(p[0], p[1], "yo", markersize=5)
+        for i, (x, y) in enumerate(h_pts):
+            c = "green" if i < 4 else "orange"
+            ax_main.plot(x, y, "o", color=c, markersize=7)
+            ax_main.text(x + 6, y - 6, str(i + 1), color=c, fontsize=10, weight="bold")
+            if i < len(w_pts):
+                wx, wy = w_pts[i]
+                ax_main.text(x + 6, y + 10, f"{wx:.1f},{wy:.1f}m", color="lightblue", fontsize=8)
+        mode = "ROI" if roi_mode else "HOMOGRAPHY"
+        n = len(roi_pts if roi_mode else h_pts)
+        ax_main.set_title(f"Mode: {mode} | {n} pts")
+        ax_bird.cla()
+        if warped_rgb is not None:
+            ax_bird.imshow(warped_rgb)
+        ax_bird.set_title("Bird's-eye view")
+        fig.canvas.draw_idle()
+
+    def on_click(event):
+        nonlocal roi_mode, H, warped_rgb
+        if event.inaxes != ax_main or event.xdata is None:
+            return
+        x, y = int(round(event.xdata)), int(round(event.ydata))
+        if event.button == 1:
+            if roi_mode:
+                roi_pts.append((x, y))
+                print(f"ROI {len(roi_pts)}: ({x},{y})")
+            else:
+                h_pts.append((x, y))
+                print(f"Point {len(h_pts)}: ({x},{y})")
+            redraw()
+        elif event.button == 3:
+            if roi_mode and roi_pts:
+                roi_pts.pop()
+            elif not roi_mode and h_pts:
+                h_pts.pop()
+                if w_pts:
+                    w_pts.pop()
+                H, warped_rgb = None, None
+            redraw()
+
+    def on_key(event):
+        nonlocal roi_mode, H, warped_rgb
+        k = event.key.lower()
+        if k == "q":
+            plt.close()
+        elif k == "r":
+            roi_mode = not roi_mode
+            print(f"{'ROI' if roi_mode else 'Homography'} mode")
+            redraw()
+        elif k == "c":
+            h_pts.clear()
+            w_pts.clear()
+            roi_pts.clear()
+            H, warped_rgb = None, None
+            redraw()
+        elif k == "h" and len(h_pts) >= 4:
+            # Auto-assign world coords: odd idx x=lane_width, even idx x=0
+            # idx >=2 gets segment_length for y
+            for i in range(len(h_pts)):
+                if i < len(w_pts):
+                    continue
+                wx = args.lane_width if i % 2 == 1 else 0.0
+                wy = args.segment_length if i >= 2 else 0.0
+                w_pts.append((wx, wy))
+                print(f"  Pt {i+1} world ({wx:.2f}, {wy:.2f}) m (--lane-width {args.lane_width}, --segment-length {args.segment_length})")
+            n = min(len(h_pts), len(w_pts))
+            if n >= 4:
+                ip = np.float32(h_pts[:n])
+                wp = np.float32(w_pts[:n])
+                if n == 4:
+                    H = cv2.getPerspectiveTransform(ip, wp)
+                else:
+                    H, _ = cv2.findHomography(ip, wp, cv2.RANSAC, 5.0)
+                if H is not None:
+                    print(f"Homography:\n{H}")
+                    ppm = args.pixels_per_meter
+                    out_w = int(args.lane_width * ppm) or 1
+                    out_h = int(args.segment_length * ppm) or 1
+                    # Scale H so world (0,0) maps to pixel (0,0)
+                    # and world (lw, sl) maps to pixel (lw*ppm, sl*ppm)
+                    S = np.array([[ppm, 0, 0], [0, ppm, 0], [0, 0, 1]], dtype=np.float32)
+                    warp = cv2.warpPerspective(img_bgr, S @ H, (out_w, out_h))
+                    warped_rgb = cv2.cvtColor(warp, cv2.COLOR_BGR2RGB)
+            redraw()
+        elif k == "s":
+            data = dict(
+                image_points=h_pts,
+                world_points=w_pts,
+                roi_polygon=roi_pts,
+                homography_matrix=H.tolist() if H is not None else [],
+            )
+            Path(args.output).write_text(json.dumps(data, indent=2))
+            print(f"Saved to {args.output}")
+
+    fig.canvas.mpl_connect("button_press_event", on_click)
+    fig.canvas.mpl_connect("key_press_event", on_key)
+    print("READY")
+    plt.show()
 
 
 if __name__ == "__main__":

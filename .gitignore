@@ -1,0 +1,20 @@
+# Model weights — download via YOLO on each machine
+*.pt
+
+# Generated video outputs
+*.mp4
+
+# Video source footage (too large for git, copy manually)
+videos/
+
+# Python cache
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Personal opencode config
+.omo/
+
+# Generated CSVs (can regenerate via replay.py)
+replayed_speeds.csv
+stable_results.csv
