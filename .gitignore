@@ -12,9 +12,15 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
+# macOS
+.DS_Store
+
 # Personal opencode config
 .omo/
 
 # Generated CSVs (can regenerate via replay.py)
 replayed_speeds.csv
 stable_results.csv
+
+# Build artifacts
+*.egg-info/
