@@ -23,10 +23,10 @@ import cv2
 import numpy as np
 
 try:
-    from .engine import Calibration, TrafficEngine
+    from .calibration import Calibration
     from .speed import RobustSpeedEstimator
 except ImportError:
-    from engine import Calibration, TrafficEngine
+    from calibration import Calibration
     from speed import RobustSpeedEstimator
 
 
@@ -70,6 +70,23 @@ def _world_from_bbox(calibration: Calibration, bbox: tuple[int, int, int, int]) 
     x1, _y1, x2, y2 = bbox
     cx = (x1 + x2) / 2.0
     return calibration.world_from_image(cx, float(y2))
+
+
+def _draw_vehicle_label(
+    frame: np.ndarray,
+    *,
+    x1: int,
+    y1: int,
+    track_id: int,
+    class_name: str,
+    speed_mph: Optional[float],
+) -> None:
+    speed_text = f"{speed_mph:.0f} MPH" if speed_mph is not None else "-- MPH"
+    text = f"{class_name} | {speed_text} | #{track_id}"
+    cv2.putText(
+        frame, text, (x1, max(18, y1 - 8)),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 255, 0), 2, cv2.LINE_AA,
+    )
 
 
 def replay_video(
@@ -136,7 +153,7 @@ def replay_video(
                 ))
 
                 cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                TrafficEngine._draw_vehicle_label(
+                _draw_vehicle_label(
                     annotated, x1=x1, y1=y1, track_id=det.track_id,
                     class_name=det.class_name,
                     speed_mph=speed_value if speed_valid else None,

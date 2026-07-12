@@ -1,110 +1,212 @@
-# Traffic Intelligence System
+# Traffic Intelligence
 
-Sensor-fusion traffic intelligence: detection, tracking, speed estimation, and violation alerts. Built for city-district deployment.
+Camera-based vehicle perception, calibrated speed estimation, pair-attributed crash detection, and rolling incident capture.
 
-## Architecture
+This repository is a working engineering package, not a dashboard-first demo. The core runtime is split into independent perception, motion, incident, and recording layers so new forensic incident analyzers can be added without turning the tracker into a monolith.
 
+## Current pipeline
+
+```text
+Camera / video
+    ↓
+YOLO11 @ configurable inference size
+    ↓
+class-agnostic vehicle NMS
+    ↓
+ByteTrack (raw association IDs)
+    ↓
+CanonicalIdentityManager
+  • stable per-camera physical-vehicle IDs
+  • conservative short-gap track stitching
+  • appearance / motion / scale consistency
+  • raw-ID hijack protection
+  • provisional-ID suppression
+    ↓
+TrackQualityGate
+  • maturity
+  • confidence EMA
+  • class consistency
+  • geometry-instability rejection
+  • reacquisition cooldown
+    ↓
+Trusted Detection stream
+    ├──────────────→ RobustSpeedEstimator + Calibration
+    │
+    └──────────────→ CrashDetector
+                       • pair geometry / TTC
+                       • apparent-depth consistency
+                       • impact-time motion discontinuity
+                       • synchronized pair evidence
+                       • candidate-only optical flow
+                       • post-impact support
+                             ↓
+                    TrafficIncidentPipeline
+                             ↓
+                    RollingSegmentBuffer
 ```
-Camera feed → YOLO11m@1280 → ByteTrack → ROI filter → speed estimator → annotated video + CSV
-```
 
-| Component | What it does |
-|-----------|-------------|
-| **YOLO11m** | Detects vehicles (car, truck, bus, motorcycle) at native resolution |
-| **ByteTrack** | Assigns stable IDs to vehicles across frames, handles brief occlusions |
-| **ROI filter** | Keeps detections inside the drivable road polygon; ignores sky, sidewalk, clutter |
-| **Speed estimator** | Homography → interpolated reference → single reference → no speed. Only activates with calibration |
-| **Streamlit dashboard** | Review annotated video, violation list, speed histogram, traffic stats |
+## What works now
+
+- Vehicle detection for COCO vehicle classes: car, motorcycle, bus, truck.
+- Class-agnostic NMS before tracking to prevent duplicate `car`/`truck` tracks for one physical vehicle.
+- ByteTrack association plus a canonical identity layer that repairs conservative short-gap fragmentation before analytics see the track.
+- Raw tracker IDs remain diagnostic only; speed/crash history is keyed by canonical vehicle identity.
+- Scene/source-change reset so tracking, identity, speed, incident state, and crash overlays do not leak between sources.
+- Homography-based road-plane projection with calibration-fit diagnostics.
+- Robust trajectory speed estimation with outlier rejection, track-gap handling, acceleration limiting, and fit-quality confidence.
+- Pair-attributed crash detection. A standalone hard stop, noisy track, or unrelated nearby vehicle cannot emit a crash by itself.
+- FPS-normalized crash kinematics validated at 15, 30, and 60 FPS in synthetic regression tests.
+- Rolling pre/post incident recorder with synchronized telemetry and accurate configured event-window metadata.
+- Headless crash validation and deterministic cached-detector regression replay.
+- Live-first Streamlit operations panel in Spanish, with active vehicles, speed, crash alerts, incident capture, and evidence review.
 
 ## Quick start
 
-```bash
-# Process a video (tracking only — no calibration needed)
-python3 -c "
-from traffic_intel.engine import TrafficEngine
-e = TrafficEngine()
-print(e.process_video('videos/clear.mp4', output_path='output.mp4'))
-"
-
-# Launch the dashboard
-streamlit run traffic_intel/app.py -- --video videos/clear.mp4
-```
-
-## Calibration wizard
-
-Speed requires calibration. Run this on a reference frame:
+### 1. Install
 
 ```bash
-python3 traffic_intel/calibrate.py --image ref.jpg --output calib.json
+python -m pip install -e .
 ```
 
-Four steps, all optional:
-
-| Step | What you do | What you get |
-|------|-------------|-------------|
-| **1a. Near reference** | Click 2 points on a known-length object (e.g. 10ft lane marking) | Basic mph scale at that depth |
-| **1b. Far reference** | Click same object further away | Perspective-correct mph at all depths |
-| **2. Homography** | Click 4 road corners forming a rectangle, enter dimensions | Full perspective-correct speed |
-| **3. ROI polygon** | Click points around the drivable area | Filters out non-road detections |
-| **4. Speed trap** | Click 2 pairs of lines with known distance between them | Line-crossing event logging |
-
-Speed priority: **homography → interpolated references → single reference → no speed**.
-
-## Usage with calibration
+For dashboard dependencies:
 
 ```bash
-# With calibration (enables speed)
-python3 -c "
-from traffic_intel.engine import TrafficEngine, Calibration
-e = TrafficEngine(calibration=Calibration.load('calib.json'), speed_limit=50)
-print(e.process_video('traffic.mp4', output_path='annotated.mp4'))
-"
-
-# Dashboard with calibration
-streamlit run traffic_intel/app.py -- --video traffic.mp4 --calibration calib.json
+python -m pip install -e '.[dashboard]'
 ```
 
-## Output
+### 2. Check the environment
 
-- **Annotated video** — bounding boxes with track IDs and speed (when calibrated)
-- **CSV log** — every detection: frame, track ID, class, confidence, bbox, speed, violation
-- **Summary** — unique vehicles, total detections, violations, avg/max speed
-
-## Deployment phases
-
-| Phase | What | Hardware needed |
-|-------|------|----------------|
-| **1. PoC** | Software demo on recorded/streaming footage | Any camera or recorded video |
-| **2. Paid pilot** | 1-3 intersections with real calibration | City-approved camera location |
-| **3. Production** | Custom models, ANPR, radar fusion, evidence packages | Jetson AGX Orin, radar, ANPR camera |
-
-## Project structure
-
+```bash
+traffic-intel-doctor --model yolo11n.pt
 ```
+
+### 3. Run the test suite
+
+```bash
+pytest -q
+```
+
+Current repository suite: **19 passing tests**.
+
+### 4. Run deterministic crash regression
+
+The repository includes the two supplied source videos and cached YOLO outputs for fast tracker/crash-logic replay:
+
+```bash
+python tools/replay_cached_crash_regression.py
+```
+
+Expected current result:
+
+```text
+crash:  impact=123  detected=127  one event
+crash2: impact=238  detected=238  one event
+```
+
+The cached replay isolates downstream algorithm regressions from model runtime and hardware differences. It does **not** replace full production-resolution inference validation.
+
+### 5. Validate a video through the full model pipeline
+
+```bash
+python -m traffic_intel.validate_crashes validation/videos/crash.mp4 \
+  --model yolo11n.pt \
+  --imgsz 1280 \
+  --output crash_validated.mp4 \
+  --events-json crash_events.json
+```
+
+On Apple Silicon, place an exported `yolo11n.mlpackage` beside the `.pt` file and the engine will prefer it automatically when `yolo11n.pt` is requested.
+
+### 6. Run live
+
+```bash
+python -m traffic_intel.live \
+  --camera 0 \
+  --model yolo11n.pt \
+  --imgsz 1280 \
+  --event-dir events
+```
+
+With calibration and a speed threshold:
+
+```bash
+python -m traffic_intel.live \
+  --camera rtsp://camera/stream \
+  --calibration calib.json \
+  --speed-limit 50 \
+  --pre-event-seconds 20 \
+  --post-event-seconds 10
+```
+
+Controls: `q` quits, `m` manually captures an incident package.
+
+## Python API
+
+```python
+from traffic_intel import Calibration, TrafficEngine, TrafficIncidentPipeline
+
+calibration = Calibration.load("calib.json")
+engine = TrafficEngine(
+    model_path="yolo11n.pt",
+    calibration=calibration,
+    imgsz=1280,
+    retain_history=False,
+)
+pipeline = TrafficIncidentPipeline(engine)
+
+# result = pipeline.process_frame(frame)
+# result.detections -> trusted vehicle observations
+# result.crashes    -> pair-attributed crash events
+# result.annotated  -> display/recording frame
+```
+
+## Calibration
+
+```bash
+python -m traffic_intel.calibrate --image ref_frame.jpg --output calib.json
+```
+
+The current calibration model supports:
+
+- a road-plane homography from four or more image/world correspondences;
+- an optional road ROI polygon;
+- calibration-fit diagnostics based on reprojection residuals.
+
+Speed is intentionally unavailable when a vehicle lies outside the calibrated road-plane region.
+
+## Project layout
+
+```text
 traffic_intel/
-├── engine.py       # Core: detection → tracking → speed → violations
-├── calibrate.py    # Interactive calibration wizard (matplotlib)
-├── app.py          # Streamlit dashboard
-└── data/           # Output videos, CSVs, calibration files
+├── calibration.py      # road-plane projection and calibration quality
+├── config.py           # typed runtime configuration
+├── domain.py           # shared trusted observation records
+├── identity.py         # canonical physical-vehicle identity / track stitching
+├── tracking.py         # downstream track trust / reacquisition gate
+├── scene.py            # source-discontinuity detection
+├── engine.py           # YOLO + NMS + ByteTrack + canonical identity + speed
+├── speed.py            # robust world-space trajectory speed
+├── crash_detector.py   # pair interaction and impact-time state machine
+├── crash_visuals.py    # crash annotation persistence only
+├── pipeline.py         # canonical perception + incident coordinator
+├── event_recorder.py   # rolling annotated-video and telemetry capture
+├── live.py             # live camera adapter
+├── validate_crashes.py # full-video headless validation
+├── replay.py           # replay exported tracks through speed estimation
+├── calibrate.py        # interactive calibration tool
+├── doctor.py           # environment readiness checks
+└── app.py              # live Spanish operations dashboard
+
+tests/                  # unit and behavioral regression tests
+validation/
+├── videos/             # supplied crash source clips
+├── cached/             # cached detector outputs for deterministic replay
+├── expected.json       # accepted event timing windows
+└── latest_cached_results.json
 ```
 
-## Calibration reference
+See `ARCHITECTURE.md` for design boundaries and `VALIDATION.md` for the current regression scope.
 
-| Object | Standard length (US) | Standard length (metric) |
-|--------|---------------------|--------------------------|
-| Dashed lane marking | 10 ft | 3.0 m |
-| Lane width | 12 ft | 3.7 m |
-| Crosswalk stripe | 10-12 ft | 3.0-3.7 m |
-| Parking space | 18 ft | 5.5 m |
+## Important scope
 
-## Edge cases
-
-- **No calibration** — tracking only, no speed displayed
-- **Single reference only** — approximate mph, perspective distortion at different depths
-- **Two references (near + far)** — interpolated scale, good perspective correction
-- **Homography** — full perspective correction, requires 4 accurate clicks
-- **ROI only** — filters detections, useful even without speed
-
-## Pitch
-
-> *"I can demonstrate the system using your existing camera feeds or a camera at one approved intersection. I don't need to permanently install equipment until the district approves a pilot."*
+This codebase is ready to demonstrate and pilot as a traffic-perception and incident-detection system. It is **not yet a legally certified speed-measurement device or a complete chain-of-custody evidence platform**. Those require independent calibration validation, deployment controls, immutable manifests/signing, access logging, and jurisdiction-specific review.

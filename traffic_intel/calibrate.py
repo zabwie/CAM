@@ -23,11 +23,16 @@ import json
 from pathlib import Path
 
 import cv2
-import matplotlib
-matplotlib.use("gtk4agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.patches import Polygon
+
+# Reuse Calibration's compute_quality so the wizard and engine share
+# identical quality logic.
+try:
+    from .calibration import Calibration
+except ImportError:  # direct script execution
+    from calibration import Calibration
 
 
 LANE_WIDTH = 3.7
@@ -61,6 +66,17 @@ def main():
     roi_mode = False
     H = None
     warped_rgb = None
+    point_errors: list[float] = []   # per-point reprojection error (m)
+    quality_summary: str = ""         # one-line quality grade for the title bar
+
+    def _error_color(err_m: float) -> str:
+        if err_m < 0.10:
+            return "lime"
+        if err_m < 0.30:
+            return "gold"
+        if err_m < 0.50:
+            return "orange"
+        return "red"
 
     def redraw():
         nonlocal H, warped_rgb
@@ -72,14 +88,25 @@ def main():
             ax_main.plot(p[0], p[1], "yo", markersize=5)
         for i, (x, y) in enumerate(h_pts):
             c = "green" if i < 4 else "orange"
-            ax_main.plot(x, y, "o", color=c, markersize=7)
-            ax_main.text(x + 6, y - 6, str(i + 1), color=c, fontsize=10, weight="bold")
-            if i < len(w_pts):
+            # If we have per-point errors, colour-code by magnitude instead.
+            if i < len(point_errors):
+                c = _error_color(point_errors[i])
+            ax_main.plot(x, y, "o", color=c, markersize=9 if point_errors else 7)
+            if i < len(point_errors):
+                label = f"{i+1}  {point_errors[i]:.2f}m"
+                ax_main.text(x + 6, y - 6, label, color=c, fontsize=9, weight="bold")
+            elif i < len(w_pts):
                 wx, wy = w_pts[i]
+                ax_main.text(x + 6, y - 6, str(i + 1), color=c, fontsize=10, weight="bold")
                 ax_main.text(x + 6, y + 10, f"{wx:.1f},{wy:.1f}m", color="lightblue", fontsize=8)
+            elif i < 4:  # at least show the click number
+                ax_main.text(x + 6, y - 6, str(i + 1), color=c, fontsize=10, weight="bold")
         mode = "ROI" if roi_mode else "HOMOGRAPHY"
         n = len(roi_pts if roi_mode else h_pts)
-        ax_main.set_title(f"Mode: {mode} | {n} pts")
+        title = f"Mode: {mode} | {n} pts"
+        if quality_summary:
+            title += f"  |  {quality_summary}"
+        ax_main.set_title(title)
         ax_bird.cla()
         if warped_rgb is not None:
             ax_bird.imshow(warped_rgb)
@@ -87,7 +114,7 @@ def main():
         fig.canvas.draw_idle()
 
     def on_click(event):
-        nonlocal roi_mode, H, warped_rgb
+        nonlocal roi_mode, H, warped_rgb, point_errors, quality_summary
         if event.inaxes != ax_main or event.xdata is None:
             return
         x, y = int(round(event.xdata)), int(round(event.ydata))
@@ -107,10 +134,12 @@ def main():
                 if w_pts:
                     w_pts.pop()
                 H, warped_rgb = None, None
+                point_errors.clear()
+                quality_summary = ""
             redraw()
 
     def on_key(event):
-        nonlocal roi_mode, H, warped_rgb
+        nonlocal roi_mode, H, warped_rgb, point_errors, quality_summary
         k = event.key.lower()
         if k == "q":
             plt.close()
@@ -122,6 +151,8 @@ def main():
             h_pts.clear()
             w_pts.clear()
             roi_pts.clear()
+            point_errors.clear()
+            quality_summary = ""
             H, warped_rgb = None, None
             redraw()
         elif k == "h" and len(h_pts) >= 4:
@@ -152,15 +183,47 @@ def main():
                     S = np.array([[ppm, 0, 0], [0, ppm, 0], [0, 0, 1]], dtype=np.float32)
                     warp = cv2.warpPerspective(img_bgr, S @ H, (out_w, out_h))
                     warped_rgb = cv2.cvtColor(warp, cv2.COLOR_BGR2RGB)
+
+                    # ---- quality report ------------------------------------
+                    cal = Calibration(
+                        image_points=h_pts[:n],
+                        world_points=w_pts[:n],
+                        homography_matrix=H.tolist(),
+                    )
+                    quality = cal.compute_quality()
+                    if quality:
+                        point_errors.clear()
+                        # Recompute per-point errors for annotation overlay.
+                        projected = cv2.perspectiveTransform(
+                            np.float32(h_pts[:n]).reshape(1, -1, 2), H
+                        )[0]
+                        point_errors = [
+                            float(np.linalg.norm(projected[j] - wp[j]))
+                            for j in range(n)
+                        ]
+                        grade = quality.get("quality_grade", "?")
+                        quality_summary = f"Quality: {grade}"
+                        print(f"\n  Calibration fit quality — {grade}")
+                        print(f"  Points:               {quality['point_count']}")
+                        print(f"  Mean reproj. residual: {quality['mean_reprojection_residual_m']:.3f} m")
+                        print(f"  Max reproj. residual:  {quality['max_reprojection_residual_m']:.3f} m")
+                        print(f"  Std reproj. residual:  {quality['std_reprojection_residual_m']:.3f} m")
+                        print(f"  Inlier ratio:          {quality['inlier_ratio']:.1%}")
+                    else:
+                        point_errors.clear()
+                        quality_summary = "Quality: N/A"
             redraw()
         elif k == "s":
-            data = dict(
+            # Build a Calibration object so we get quality metadata saved too.
+            cal = Calibration(
                 image_points=h_pts,
                 world_points=w_pts,
                 roi_polygon=roi_pts,
-                homography_matrix=H.tolist() if H is not None else [],
+                homography_matrix=H.tolist() if H is not None else None,
             )
-            Path(args.output).write_text(json.dumps(data, indent=2))
+            if H is not None and h_pts and w_pts:
+                cal.compute_quality()
+            cal.save(args.output)
             print(f"Saved to {args.output}")
 
     fig.canvas.mpl_connect("button_press_event", on_click)

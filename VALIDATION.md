@@ -1,33 +1,82 @@
-# Real-video validation
+# Validation status
 
-Validated against the supplied `clear.mp4` footage using the included
-`results.csv` detections/tracks (1,660 video frames at 30 FPS).
-
-## Results
-
-- Full video replay completed: 1,660 / 1,660 frames.
-- Detection rows replayed: 26,600.
-- Tracks with calibrated, valid speed: 31.
-- Valid speed samples: 1,564.
-- Average valid displayed speed: 44.4 mph.
-- Maximum valid displayed speed: 55.7 mph.
-- The original speed column ranged from 2.9 mph to 169.6 mph; the revised
-  trajectory estimator and calibration guard remove those extreme spikes.
-- Regression suite: 8 tests passed.
-
-## Reproduce
+## Automated suite
 
 ```bash
 pytest -q
-
-python3 -m traffic_intel.replay \
-  --video clear.mp4 \
-  --detections results.csv \
-  --calibration calib.json \
-  --output annotated_stable.mp4 \
-  --output-csv stable_results.csv
 ```
 
-The YOLO model weights are not bundled. The replay command is intentionally
-provided so already-exported real detections can be re-tested and rendered
-without rerunning or downloading the detector model.
+Current result: **19 passed**.
+
+Coverage includes:
+
+- isolated hard stop does not become a crash;
+- coordinated braking does not become a crash;
+- crash is attributed to the interacting pair only;
+- nearby uninvolved third vehicle is excluded;
+- immature track discontinuity cannot become valid retroactively;
+- global scene change resets temporal assumptions while local motion does not;
+- event recorder preserves the impact frame and rejects duplicate active triggers;
+- event recorder uses unique segment paths and reports configured pre/post windows;
+- track-quality gate rejects a large ID jump and requires reacquisition;
+- constant world velocity produces a stable speed estimate;
+- a single extreme world-position jump is rejected;
+- calibration projection and calibrated-zone bounds;
+- the same synthetic physical collision is detected at similar time at 15, 30, and 60 FPS;
+- a raw tracker ID change (for example 40 → 63) can preserve the same canonical physical-vehicle ID;
+- ambiguous re-entry is not force-stitched;
+- a raw-ID hijack cannot inherit another vehicle's analytics history;
+- a strong canonical stitch can preserve a mature trusted track;
+- a near-static foreground false track cannot absorb a relocated moving vehicle without strong supporting evidence.
+
+## Supplied crash-video regression
+
+Two source videos are included under `validation/videos/`.
+
+For fast repeatable downstream regression, cached YOLO outputs are stored under `validation/cached/`. Run:
+
+```bash
+python tools/replay_cached_crash_regression.py
+```
+
+Current result:
+
+| Source | Impact frame | Confirmation frame | Events | Extra events |
+|---|---:|---:|---:|---:|
+| `crash.mp4` | 123 | 127 | 1 | 0 |
+| `crash2.mp4` | 238 | 238 | 1 | 0 |
+
+The first result is attributed to canonical vehicle IDs 11 and 19; the second to canonical IDs 13 and 14. Raw ByteTrack IDs are run-local association handles and may change underneath a stable canonical identity.
+
+## Full-model validation
+
+Use:
+
+```bash
+python -m traffic_intel.validate_crashes validation/videos/crash.mp4 \
+  --model yolo11n.pt --imgsz 1280 \
+  --output crash_validated.mp4 \
+  --events-json crash_events.json
+```
+
+The full production-resolution path should be run on the target acceleration hardware. The provided cached replay is specifically for deterministic tracker/crash-logic iteration and does not claim end-to-end detector accuracy.
+
+## Current limitation
+
+Two positive crash clips are not enough to estimate general crash precision or recall. A serious pilot should add labeled hard negatives and varied positives, then report:
+
+- event precision and recall;
+- false alarms per camera-hour;
+- impact timestamp error;
+- participant precision/recall;
+- performance by weather, lighting, camera geometry, occlusion, and crash type.
+
+## Canonical identity continuity regression
+
+The final annotated full-clip replay produced the following on both supplied clips:
+
+- adjacent high-overlap canonical ID switches: **0**;
+- remaining canonical fragmentation candidates: **0**;
+- duplicate canonical assignment frames: **0**.
+
+Raw ByteTrack fragmentation still occurs underneath the canonical layer. That is expected and is visible in the validation overlay as a smaller `raw` ID changing while the larger canonical `ID` remains stable. Metrics are regression heuristics on the supplied clips, not a general IDF1/HOTA benchmark.
