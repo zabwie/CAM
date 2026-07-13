@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "traffic-intel"
+version = "0.12.0"
+description = "Camera-based traffic perception, speed estimation, and incident detection"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "ultralytics>=8.3",
+  "supervision>=0.25,<0.30",
+  "opencv-python>=4.10",
+  "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+dashboard = ["streamlit>=1.40", "pandas>=2.2", "matplotlib>=3.8"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+traffic-intel-live = "traffic_intel.live:main"
+traffic-intel-validate-crashes = "traffic_intel.validate_crashes:main"
+traffic-intel-calibrate = "traffic_intel.calibrate:main"
+traffic-intel-doctor = "traffic_intel.doctor:main"
+traffic-intel-dashboard = "traffic_intel.dashboard:main"
+
+[tool.setuptools.packages.find]
+include = ["traffic_intel*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+pythonpath = ["."]

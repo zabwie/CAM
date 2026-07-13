@@ -1,48 +1,38 @@
-# C++
-edge/build/
-edge/CMakeUserPresets.json
-*.o
-*.a
-*.so
-*.dylib
+# Model weights — download via YOLO on each machine
+*.pt
 
-# Node / TypeScript
-server/node_modules/
-server/dist/
-web/node_modules/
-web/dist/
+# Generated video outputs
+*.mp4
 
-# Environment
-.env
+# Video source footage (too large for git, copy manually)
+videos/
 
-# SQLite databases
+# Python cache
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# macOS
+.DS_Store
+
+# Personal opencode config
+.omo/
+
+# Generated CSVs (can regenerate via replay.py)
+replayed_speeds.csv
+stable_results.csv
+
+# Build artifacts
+*.egg-info/
+
+# Runtime operational data
 *.db
 *.db-shm
 *.db-wal
-.env.local
-.env.*.local
+events/
+archive/
+data/
 
-# ML models (too large for git)
-edge/models/*.onnx
-edge/models/*.engine
-edge/models/*.pt
-!edge/models/.gitkeep
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Docker
-docker-compose.override.yml
-
-# Video test data
-*.mp4
-*.avi
-*.h264
-!testdata/*.mp4
+# Distribution output
+build/
+dist/

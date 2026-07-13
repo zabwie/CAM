@@ -1,0 +1,12 @@
+{
+  "crash": {
+    "expected_event_count": 1,
+    "trigger_frame_range": [120, 132],
+    "detected_frame_range": [123, 135]
+  },
+  "crash2": {
+    "expected_event_count": 1,
+    "trigger_frame_range": [234, 242],
+    "detected_frame_range": [234, 244]
+  }
+}

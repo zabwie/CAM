@@ -1,0 +1,149 @@
+{
+  "crash": {
+    "frames": 285,
+    "scene_cuts": [
+      13,
+      23,
+      259
+    ],
+    "events": [
+      {
+        "trigger_frame": 123,
+        "detected_frame": 127,
+        "involved_tracks": [
+          11,
+          19
+        ],
+        "score": 0.756122
+      }
+    ],
+    "identity_stitches": [
+      {
+        "frame": 125,
+        "canonical_id": 11,
+        "old_tracker_id": 2,
+        "new_tracker_id": 14,
+        "score": 0.690759817429953
+      },
+      {
+        "frame": 147,
+        "canonical_id": 17,
+        "old_tracker_id": 8,
+        "new_tracker_id": 16,
+        "score": 0.7736528580573296
+      },
+      {
+        "frame": 154,
+        "canonical_id": 21,
+        "old_tracker_id": 12,
+        "new_tracker_id": 18,
+        "score": 0.6404800920639202
+      },
+      {
+        "frame": 166,
+        "canonical_id": 21,
+        "old_tracker_id": 18,
+        "new_tracker_id": 19,
+        "score": 0.8964536619482262
+      },
+      {
+        "frame": 178,
+        "canonical_id": 24,
+        "old_tracker_id": 17,
+        "new_tracker_id": 20,
+        "score": 0.8327084372144398
+      },
+      {
+        "frame": 191,
+        "canonical_id": 19,
+        "old_tracker_id": 10,
+        "new_tracker_id": 22,
+        "score": 0.6952922896064977
+      },
+      {
+        "frame": 213,
+        "canonical_id": 21,
+        "old_tracker_id": 19,
+        "new_tracker_id": 24,
+        "score": 0.7721124308180307
+      },
+      {
+        "frame": 225,
+        "canonical_id": 25,
+        "old_tracker_id": 21,
+        "new_tracker_id": 26,
+        "score": 0.8250156667150117
+      },
+      {
+        "frame": 225,
+        "canonical_id": 21,
+        "old_tracker_id": 24,
+        "new_tracker_id": 19,
+        "score": 0.7529587309055799
+      },
+      {
+        "frame": 247,
+        "canonical_id": 32,
+        "old_tracker_id": 27,
+        "new_tracker_id": 28,
+        "score": 0.5832684325989382
+      },
+      {
+        "frame": 249,
+        "canonical_id": 12,
+        "old_tracker_id": 3,
+        "new_tracker_id": 29,
+        "score": 0.6694128790068548
+      }
+    ],
+    "identity_discontinuities": [],
+    "duplicate_canonical_frames": [],
+    "adjacent_high_overlap_canonical_switches": 0,
+    "canonical_fragmentation_candidates": 0
+  },
+  "crash2": {
+    "frames": 378,
+    "scene_cuts": [
+      2,
+      345
+    ],
+    "events": [
+      {
+        "trigger_frame": 238,
+        "detected_frame": 238,
+        "involved_tracks": [
+          13,
+          14
+        ],
+        "score": 0.687747
+      }
+    ],
+    "identity_stitches": [
+      {
+        "frame": 108,
+        "canonical_id": 9,
+        "old_tracker_id": 9,
+        "new_tracker_id": 11,
+        "score": 0.837260640786782
+      },
+      {
+        "frame": 212,
+        "canonical_id": 9,
+        "old_tracker_id": 11,
+        "new_tracker_id": 17,
+        "score": 0.8166166756518023
+      },
+      {
+        "frame": 215,
+        "canonical_id": 7,
+        "old_tracker_id": 7,
+        "new_tracker_id": 18,
+        "score": 0.8269801388308953
+      }
+    ],
+    "identity_discontinuities": [],
+    "duplicate_canonical_frames": [],
+    "adjacent_high_overlap_canonical_switches": 0,
+    "canonical_fragmentation_candidates": 0
+  }
+}

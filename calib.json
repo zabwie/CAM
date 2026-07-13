@@ -1,0 +1,67 @@
+{
+  "roi_polygon": [],
+  "image_points": [
+    [
+      525,
+      895
+    ],
+    [
+      1157,
+      941
+    ],
+    [
+      940,
+      351
+    ],
+    [
+      1011,
+      355
+    ]
+  ],
+  "world_points": [
+    [
+      0.0,
+      0.0
+    ],
+    [
+      3.7,
+      0.0
+    ],
+    [
+      0.0,
+      25.0
+    ],
+    [
+      3.7,
+      25.0
+    ]
+  ],
+  "homography_matrix": [
+    [
+      -0.015822367608519287,
+      -0.012070372348410852,
+      19.10972624630034
+    ],
+    [
+      -0.0010014618639313999,
+      0.013759215174014012,
+      -11.788730102178555
+    ],
+    [
+      0.0002381040327131269,
+      -0.004387015897088733,
+      1.0
+    ]
+  ],
+  "calibration_quality": {
+    "point_count": 4,
+    "mean_reprojection_error_m": 1.3715980458073318e-06,
+    "max_reprojection_error_m": 2.5690405891509727e-06,
+    "std_reprojection_error_m": 1.1076668897658237e-06,
+    "mean_reprojection_residual_m": 1.3715980458073318e-06,
+    "max_reprojection_residual_m": 2.5690405891509727e-06,
+    "std_reprojection_residual_m": 1.1076668897658237e-06,
+    "inlier_ratio": 1.0,
+    "quality_grade": "EXCELLENT"
+  }
+}

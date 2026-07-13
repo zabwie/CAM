@@ -1,0 +1,31 @@
+{
+  "video": "/mnt/data/2026-07-12 15-27-31.mp4",
+  "fps": 30.0,
+  "frames_processed": 90,
+  "imgsz": 640,
+  "model": "models/yolo11n.pt",
+  "optical_flow": false,
+  "events": [
+    {
+      "trigger_frame": 58,
+      "detected_frame": 65,
+      "trigger_seconds": 1.9333,
+      "detected_seconds": 2.1667,
+      "score": 0.808418,
+      "reason": "merge_occlusion_impact",
+      "description": "Probable collision: a recent vehicle observation disappeared beside a mature track as the surviving vehicle box abruptly expanded.",
+      "involved_tracks": [
+        1
+      ],
+      "evidence": {
+        "merge_area_ratio": 2.216969472253121,
+        "merge_width_ratio": 1.4695340501792116,
+        "lost_vehicle_confidence": 0.13426469266414642,
+        "lost_vehicle_persistence": 1.0,
+        "lost_vehicle_proximity": 0.5426958470471321,
+        "merged_box_absorption": 1.0,
+        "missing_frames": 7.0
+      }
+    }
+  ]
+}
