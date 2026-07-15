@@ -1,6 +1,6 @@
 # Validation fixtures
 
-`videos/` contains the two source clips supplied for crash-regression work.
+Source video clips are in the repository `videos/` directory.
 
 `cached/` contains YOLO detector output cached at 640px. These files make tracker and crash-logic iteration fast and deterministic without requiring model inference on every test run.
 

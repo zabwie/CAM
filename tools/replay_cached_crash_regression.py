@@ -21,11 +21,11 @@ import supervision as sv
 from supervision.tracker.byte_tracker.core import ByteTrack
 
 from traffic_intel.config import SceneChangeConfig, TrackingConfig
-from traffic_intel.crash_detector import CrashDetector
+from traffic_intel.core.identity import CanonicalIdentityManager, RawTrackObservation
+from traffic_intel.core.scene import SceneChangeDetector
+from traffic_intel.core.tracking import TrackQualityGate
 from traffic_intel.domain import Detection
-from traffic_intel.identity import CanonicalIdentityManager, RawTrackObservation
-from traffic_intel.scene import SceneChangeDetector
-from traffic_intel.tracking import TrackQualityGate
+from traffic_intel.incident.crash_detector import CrashDetector
 
 VEHICLE_IDS = {2, 3, 5, 7}
 
@@ -176,7 +176,7 @@ def main() -> None:
     for name in ("crash", "crash2"):
         result = replay(
             ROOT / "validation" / "cached" / f"{name}_yolo640.json",
-            ROOT / "validation" / "videos" / f"{name}.mp4",
+            ROOT / "videos" / f"{name}.mp4",
         )
         output[name] = result
         events = result["events"]

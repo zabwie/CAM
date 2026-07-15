@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from traffic_intel.calibration import Calibration
+from traffic_intel.motion.calibration import Calibration
 
 
 def test_identity_homography_projects_inside_calibrated_zone() -> None:

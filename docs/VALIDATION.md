@@ -31,7 +31,7 @@ Coverage includes:
 
 ## Supplied crash-video regression
 
-Two source videos are included under `validation/videos/`.
+Two source videos are included under `videos/`.
 
 For fast repeatable downstream regression, cached YOLO outputs are stored under `validation/cached/`. Run:
 
@@ -53,8 +53,8 @@ The first result is attributed to canonical vehicle IDs 11 and 19; the second to
 Use:
 
 ```bash
-python -m traffic_intel.validate_crashes validation/videos/crash.mp4 \
-  --model yolo11n.pt --imgsz 1280 \
+python -m traffic_intel.validate_crashes videos/crash.mp4 \
+--model models/yolo11n.pt --imgsz 1280 \
   --output crash_validated.mp4 \
   --events-json crash_events.json
 ```

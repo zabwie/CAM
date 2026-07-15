@@ -77,7 +77,7 @@ python -m pip install -e '.[dashboard]'
 ### 2. Check the environment
 
 ```bash
-traffic-intel-doctor --model yolo11n.pt
+traffic-intel-doctor --model models/yolo11n.pt
 ```
 
 ### 3. Run the test suite
@@ -108,21 +108,21 @@ The cached replay isolates downstream algorithm regressions from model runtime a
 ### 5. Validate a video through the full model pipeline
 
 ```bash
-python -m traffic_intel.validate_crashes validation/videos/crash.mp4 \
-  --model yolo11n.pt \
+python -m traffic_intel.validate_crashes videos/crash.mp4 \
+  --model models/yolo11n.pt \
   --imgsz 1280 \
   --output crash_validated.mp4 \
   --events-json crash_events.json
 ```
 
-On Apple Silicon, place an exported `yolo11n.mlpackage` beside the `.pt` file and the engine will prefer it automatically when `yolo11n.pt` is requested.
+On Apple Silicon, place an exported `yolo11n.mlpackage` in `models/` and the engine will prefer it automatically.
 
 ### 6. Run live
 
 ```bash
 python -m traffic_intel.live \
   --camera 0 \
-  --model yolo11n.pt \
+  --model models/yolo11n.pt \
   --imgsz 1280 \
   --event-dir events
 ```
@@ -147,7 +147,7 @@ from traffic_intel import Calibration, TrafficEngine, TrafficIncidentPipeline
 
 calibration = Calibration.load("calib.json")
 engine = TrafficEngine(
-    model_path="yolo11n.pt",
+    model_path="models/yolo11n.pt",
     calibration=calibration,
     imgsz=1280,
     retain_history=False,
@@ -163,7 +163,7 @@ pipeline = TrafficIncidentPipeline(engine)
 ## Calibration
 
 ```bash
-python -m traffic_intel.calibrate --image ref_frame.jpg --output calib.json
+python -m traffic_intel.calibrate --image images/ref_frame.jpg --output calib.json
 ```
 
 The current calibration model supports:
@@ -197,15 +197,18 @@ traffic_intel/
 ├── doctor.py           # environment readiness checks
 └── app.py              # live Spanish operations dashboard
 
+docs/                   # architecture and validation documentation
+images/                 # reference images (calibration frames)
+models/                 # YOLO model weights
+videos/                 # supplied crash source clips
 tests/                  # unit and behavioral regression tests
 validation/
-├── videos/             # supplied crash source clips
 ├── cached/             # cached detector outputs for deterministic replay
 ├── expected.json       # accepted event timing windows
 └── latest_cached_results.json
 ```
 
-See `ARCHITECTURE.md` for design boundaries and `VALIDATION.md` for the current regression scope.
+See `docs/ARCHITECTURE.md` for design boundaries and `docs/VALIDATION.md` for the current regression scope.
 
 ## Important scope
 

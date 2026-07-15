@@ -39,15 +39,27 @@ st.set_page_config(
 )
 
 try:
-    from .archive import ArchiveRecorderConfig, ContinuousArchiveRecorder
-    from .engine import Calibration, TrafficEngine
-    from .event_recorder import EventRecorderConfig, RollingSegmentBuffer
-    from .pipeline import TrafficIncidentPipeline
+    from . import __version__
+    from .analytics import CameraHealthAccumulator, VehiclePassageAggregator
+    from .analytics_store import AnalyticsStore
+    from .capture import LatestFrameCapture
+    from .core.engine import TrafficEngine
+    from .core.pipeline import TrafficIncidentPipeline
+    from .motion.calibration import Calibration
+    from .recording.archive import ArchiveRecorderConfig, ContinuousArchiveRecorder
+    from .recording.event_recorder import EventRecorderConfig, RollingSegmentBuffer
+    from .vision_quality import VisionQualityMonitor
 except ImportError:  # ejecución directa con Streamlit
-    from traffic_intel.archive import ArchiveRecorderConfig, ContinuousArchiveRecorder
-    from traffic_intel.engine import Calibration, TrafficEngine
-    from traffic_intel.event_recorder import EventRecorderConfig, RollingSegmentBuffer
-    from traffic_intel.pipeline import TrafficIncidentPipeline
+    from traffic_intel import __version__
+    from traffic_intel.analytics import CameraHealthAccumulator, VehiclePassageAggregator
+    from traffic_intel.analytics_store import AnalyticsStore
+    from traffic_intel.capture import LatestFrameCapture
+    from traffic_intel.core.engine import TrafficEngine
+    from traffic_intel.core.pipeline import TrafficIncidentPipeline
+    from traffic_intel.motion.calibration import Calibration
+    from traffic_intel.recording.archive import ArchiveRecorderConfig, ContinuousArchiveRecorder
+    from traffic_intel.recording.event_recorder import EventRecorderConfig, RollingSegmentBuffer
+    from traffic_intel.vision_quality import VisionQualityMonitor
 
 
 # ---------------------------------------------------------------------------
@@ -60,7 +72,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--camera", default="0", help="Índice de cámara o URL RTSP")
     parser.add_argument("--video", default=None, help="Video de prueba opcional")
     parser.add_argument("--calibration", default=None, help="JSON de calibración")
-    parser.add_argument("--model", default="yolo11n.pt", help="Modelo YOLO")
+    parser.add_argument("--model", default="models/yolo11n.pt", help="Modelo YOLO")
     parser.add_argument("--imgsz", type=int, default=1280, help="Resolución de inferencia")
     parser.add_argument("--event-dir", default="events", help="Carpeta de incidentes")
     parser.add_argument("--archive-dir", default="archive", help="Carpeta de grabaciones continuas")
@@ -68,6 +80,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--retention-days", type=int, default=30)
     parser.add_argument("--pre-event-seconds", type=float, default=20.0)
     parser.add_argument("--post-event-seconds", type=float, default=10.0)
+    parser.add_argument("--analytics-db", default="analytics.db")
+    parser.add_argument("--speed-limit", type=float, default=None)
     args, _ = parser.parse_known_args()
     return args
 
@@ -257,14 +271,20 @@ st.markdown(
 
 @dataclass
 class LiveRuntime:
-    cap: cv2.VideoCapture
+    cap: cv2.VideoCapture | LatestFrameCapture
     engine: TrafficEngine
     pipeline: TrafficIncidentPipeline
     recorder: RollingSegmentBuffer
     archive: ContinuousArchiveRecorder | None
+    quality_monitor: VisionQualityMonitor
+    analytics_store: AnalyticsStore | None
+    passage_aggregator: VehiclePassageAggregator | None
+    health_accumulator: CameraHealthAccumulator | None
     source_label: str
     source_value: str | int
     camera_fps: float
+    last_sequence: int = 0
+    last_capture_timestamp: float = field(default_factory=time.time)
     started_at: float = field(default_factory=time.time)
     seen_track_ids: set[int] = field(default_factory=set)
     analysis_fps_samples: deque[float] = field(default_factory=lambda: deque(maxlen=30))
@@ -272,13 +292,25 @@ class LiveRuntime:
 
     def close(self) -> None:
         try:
-            self.cap.release()
+            try:
+                if self.analytics_store is not None and self.passage_aggregator is not None:
+                    self.analytics_store.write_passages(self.passage_aggregator.flush())
+                if self.analytics_store is not None and self.health_accumulator is not None:
+                    final_health = self.health_accumulator.flush(self.last_capture_timestamp)
+                    if final_health is not None:
+                        self.analytics_store.write_camera_health([final_health])
+            finally:
+                if self.analytics_store is not None:
+                    self.analytics_store.close()
         finally:
             try:
-                self.recorder.close()
+                self.cap.release()
             finally:
-                if self.archive is not None:
-                    self.archive.close()
+                try:
+                    self.recorder.close()
+                finally:
+                    if self.archive is not None:
+                        self.archive.close()
 
 
 @dataclass
@@ -309,11 +341,15 @@ def _init_state() -> None:
         "source_mode": "Cámara / RTSP",
         "source_value": str(ARGS.camera),
         "calibration_path": ARGS.calibration or ("calib.json" if Path("calib.json").exists() else ""),
-        "model_path": ARGS.model if ARGS.model in {"yolo11n.pt", "yolo11s.pt", "yolo11m.pt"} else "yolo11n.pt",
+        "model_path": ARGS.model if ARGS.model in {"models/yolo11n.pt", "models/yolo11s.pt", "models/yolo11m.pt", "yolo11n.pt", "yolo11s.pt", "yolo11m.pt"} else "models/yolo11n.pt",
         "imgsz": int(ARGS.imgsz),
         "event_dir": ARGS.event_dir,
         "archive_dir": ARGS.archive_dir,
         "archive_enabled": True,
+        "analytics_enabled": True,
+        "analytics_db": ARGS.analytics_db,
+        "speed_limit": ARGS.speed_limit,
+        "speed_limit_input": float(ARGS.speed_limit or 0.0),
         "archive_segment_minutes": float(ARGS.archive_segment_minutes),
         "retention_days": int(ARGS.retention_days),
         "municipality": "",
@@ -393,11 +429,15 @@ def _calibration_status(runtime: LiveRuntime | None) -> tuple[str, str]:
 
 def _start_runtime() -> LiveRuntime:
     source = _resolve_source()
-    cap = cv2.VideoCapture(source)
-    if not cap.isOpened():
-        raise RuntimeError(f"No se pudo abrir la fuente: {_safe_source_label(source)}")
-
-    fps = float(cap.get(cv2.CAP_PROP_FPS) or 30.0)
+    is_demo = st.session_state.source_mode == "Video de prueba"
+    if is_demo:
+        cap: cv2.VideoCapture | LatestFrameCapture = cv2.VideoCapture(source)
+        if not cap.isOpened():
+            raise RuntimeError(f"No se pudo abrir la fuente: {_safe_source_label(source)}")
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 30.0)
+    else:
+        cap = LatestFrameCapture(source)
+        fps = cap.fps
     calibration = _load_calibration(st.session_state.calibration_path)
     engine = TrafficEngine(
         model_path=st.session_state.model_path,
@@ -432,12 +472,36 @@ def _start_runtime() -> LiveRuntime:
                 source_label=source_label,
             ),
         )
+
+    analytics_store = None
+    passage_aggregator = None
+    health_accumulator = None
+    if bool(st.session_state.analytics_enabled):
+        analytics_store = AnalyticsStore(str(st.session_state.analytics_db))
+        passage_aggregator = VehiclePassageAggregator(
+            camera_id=camera_name,
+            municipality=str(st.session_state.municipality).strip(),
+            location_id=str(st.session_state.location_name).strip(),
+            speed_limit_mph=st.session_state.speed_limit,
+            calibration_id=(
+                Path(str(st.session_state.calibration_path)).name
+                if str(st.session_state.calibration_path).strip()
+                else ""
+            ),
+            software_version=__version__,
+        )
+        health_accumulator = CameraHealthAccumulator(camera_name)
+
     return LiveRuntime(
         cap=cap,
         engine=engine,
         pipeline=pipeline,
         recorder=recorder,
         archive=archive,
+        quality_monitor=VisionQualityMonitor(),
+        analytics_store=analytics_store,
+        passage_aggregator=passage_aggregator,
+        health_accumulator=health_accumulator,
         source_label=source_label,
         source_value=source,
         camera_fps=fps,
@@ -553,9 +617,31 @@ def _current_vehicle_rows(detections: list) -> list[dict]:
 
 def _process_live_frame(runtime: LiveRuntime) -> None:
     started = time.perf_counter()
-    ok, frame = runtime.cap.read()
-    if not ok or frame is None:
-        raise RuntimeError("La cámara dejó de entregar video.")
+    sequence_gap = 0
+    if isinstance(runtime.cap, LatestFrameCapture):
+        packet = runtime.cap.read_packet(
+            after_sequence=runtime.last_sequence,
+            timeout=5.0,
+        )
+        if packet is None:
+            raise RuntimeError("La cámara dejó de entregar video.")
+        sequence_gap = max(0, packet.sequence - runtime.last_sequence - 1)
+        runtime.last_sequence = packet.sequence
+        frame = packet.image
+        capture_timestamp = packet.capture_timestamp
+        monotonic_timestamp = packet.monotonic_timestamp
+    else:
+        ok, frame = runtime.cap.read()
+        if not ok or frame is None:
+            raise RuntimeError("La cámara dejó de entregar video.")
+        media_timestamp = float(runtime.cap.get(cv2.CAP_PROP_POS_MSEC)) / 1000.0
+        if media_timestamp <= 0:
+            media_timestamp = (runtime.engine.frame_count + 1) / runtime.camera_fps
+        capture_timestamp = media_timestamp
+        monotonic_timestamp = media_timestamp
+
+    runtime.last_capture_timestamp = capture_timestamp
+    quality = runtime.quality_monitor.update(frame)
 
     if runtime.archive is not None:
         runtime.archive.write_frame(
@@ -564,9 +650,38 @@ def _process_live_frame(runtime: LiveRuntime) -> None:
             timestamp=time.time(),
         )
 
-    result = runtime.pipeline.process_frame(frame, optical_flow=True)
+    result = runtime.pipeline.process_frame(
+        frame,
+        optical_flow=True,
+        capture_timestamp=capture_timestamp,
+        monotonic_timestamp=monotonic_timestamp,
+        vision_state=quality.state,
+    )
     detections = result.detections
     runtime.seen_track_ids.update(d.track_id for d in detections)
+
+    if (
+        runtime.analytics_store is not None
+        and runtime.passage_aggregator is not None
+        and runtime.health_accumulator is not None
+    ):
+        runtime.analytics_store.write_passages(
+            runtime.passage_aggregator.update(
+                detections,
+                capture_timestamp=capture_timestamp,
+                monotonic_timestamp=monotonic_timestamp,
+                vision_state=quality.state,
+            )
+        )
+        runtime.analytics_store.write_camera_health(
+            runtime.health_accumulator.update(
+                capture_timestamp=capture_timestamp,
+                monotonic_timestamp=monotonic_timestamp,
+                sequence_gap=sequence_gap,
+                detections=detections,
+                quality=quality,
+            )
+        )
 
     # Primero se escribe el frame para conservar correctamente la ventana previa.
     runtime.recorder.write_frame(result.annotated, detections, runtime.engine.frame_count)
@@ -602,8 +717,27 @@ def _process_live_frame(runtime: LiveRuntime) -> None:
                 "location": str(st.session_state.location_name).strip(),
                 "camera": str(st.session_state.camera_name or runtime.source_label).strip(),
                 "source": runtime.source_label,
+                "vision_state": quality.state,
             },
         )
+        if runtime.analytics_store is not None:
+            runtime.analytics_store.write_incident(
+                event_id=(
+                    f"{runtime.source_label}:{capture_timestamp:.6f}:"
+                    + "-".join(map(str, candidate.involved_tracks))
+                ),
+                camera_id=str(st.session_state.camera_name or runtime.source_label).strip(),
+                occurred_at=capture_timestamp,
+                incident_type=candidate.reason,
+                score=candidate.score,
+                involved_tracks=candidate.involved_tracks,
+                metadata={
+                    "description": candidate.description,
+                    "trigger_frame": candidate.trigger_frame,
+                    "detected_frame": candidate.detected_frame,
+                    "vision_state": quality.state,
+                },
+            )
 
     if st.session_state.manual_capture_requested:
         st.session_state.manual_capture_requested = False
@@ -818,6 +952,33 @@ with st.sidebar:
             placeholder="Ej. Intersección 04",
         )
 
+        st.markdown("**Analítica del piloto**")
+        st.toggle(
+            "Guardar observaciones y salud de cámara",
+            key="analytics_enabled",
+            disabled=st.session_state.monitoring,
+        )
+        if st.session_state.analytics_enabled:
+            st.text_input(
+                "Base de datos SQLite",
+                key="analytics_db",
+                disabled=st.session_state.monitoring,
+            )
+            st.number_input(
+                "Límite configurado (mph)",
+                min_value=0.0,
+                max_value=150.0,
+                step=1.0,
+                key="speed_limit_input",
+                disabled=st.session_state.monitoring,
+                help="Use 0 para registrar velocidades sin clasificar exceso.",
+            )
+            st.session_state.speed_limit = (
+                float(st.session_state.speed_limit_input)
+                if float(st.session_state.speed_limit_input) > 0
+                else None
+            )
+
         st.markdown("**Archivo de vigilancia**")
         st.toggle(
             "Guardar grabación continua",
@@ -854,7 +1015,7 @@ with st.sidebar:
         )
         st.selectbox(
             "Modelo",
-            ["yolo11n.pt", "yolo11s.pt", "yolo11m.pt"],
+            ["models/yolo11n.pt", "models/yolo11s.pt", "models/yolo11m.pt"],
             key="model_path",
             disabled=st.session_state.monitoring,
         )
@@ -866,7 +1027,7 @@ with st.sidebar:
         )
 
     st.divider()
-    st.caption("v0.10 · Panel operativo en vivo")
+    st.caption(f"v{__version__} · Panel operativo en vivo")
 
 
 # ---------------------------------------------------------------------------

@@ -6,14 +6,14 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .crash_detector import (
+from ..domain import Detection
+from ..incident.crash_detector import (
     CrashCandidate,
     CrashDetector,
     draw_crash_boxes,
     reset_crash_visuals,
     update_crash_visuals,
 )
-from .domain import Detection
 from .engine import TrafficEngine
 
 
@@ -46,8 +46,21 @@ class TrafficIncidentPipeline:
         self.draw_crash_annotations = bool(draw_crash_annotations)
         reset_crash_visuals()
 
-    def process_frame(self, frame: np.ndarray, *, optical_flow: bool = True) -> PipelineFrame:
-        annotated = self.engine.process_frame(frame)
+    def process_frame(
+        self,
+        frame: np.ndarray,
+        *,
+        optical_flow: bool = True,
+        capture_timestamp: float | None = None,
+        monotonic_timestamp: float | None = None,
+        vision_state: str = "UNKNOWN",
+    ) -> PipelineFrame:
+        annotated = self.engine.process_frame(
+            frame,
+            capture_timestamp=capture_timestamp,
+            monotonic_timestamp=monotonic_timestamp,
+            vision_state=vision_state,
+        )
         if self.engine.last_scene_cut:
             self.crash_detector.reset()
             self.crash_detector.set_fps(self.engine.fps)

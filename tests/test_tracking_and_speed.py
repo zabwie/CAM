@@ -3,8 +3,8 @@ from __future__ import annotations
 import numpy as np
 
 from traffic_intel.config import TrackingConfig
-from traffic_intel.speed import RobustSpeedEstimator
-from traffic_intel.tracking import TrackQualityGate
+from traffic_intel.core.tracking import TrackQualityGate
+from traffic_intel.motion.speed import RobustSpeedEstimator
 
 
 def test_track_quality_rejects_large_id_jump_then_reacquires() -> None:

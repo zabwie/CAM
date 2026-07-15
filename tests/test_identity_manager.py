@@ -3,8 +3,8 @@ from __future__ import annotations
 import numpy as np
 
 from traffic_intel.config import TrackingConfig
-from traffic_intel.identity import CanonicalIdentityManager, RawTrackObservation
-from traffic_intel.tracking import TrackQualityGate
+from traffic_intel.core.identity import CanonicalIdentityManager, RawTrackObservation
+from traffic_intel.core.tracking import TrackQualityGate
 
 
 def _obs(raw_id: int, x: float, y: float, *, w: float = 80, h: float = 48) -> RawTrackObservation:

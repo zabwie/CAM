@@ -19,17 +19,17 @@ from pathlib import Path
 import cv2
 
 try:
-    from .engine import TrafficEngine
-    from .pipeline import TrafficIncidentPipeline
+    from .core.engine import TrafficEngine
+    from .core.pipeline import TrafficIncidentPipeline
 except ImportError:  # pragma: no cover - direct script execution
-    from traffic_intel.engine import TrafficEngine
-    from traffic_intel.pipeline import TrafficIncidentPipeline
+    from traffic_intel.core.engine import TrafficEngine
+    from traffic_intel.core.pipeline import TrafficIncidentPipeline
 
 
 def _args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Validate crash detection on a video")
     ap.add_argument("video")
-    ap.add_argument("--model", default="yolo11n.pt")
+    ap.add_argument("--model", default="models/yolo11n.pt")
     ap.add_argument("--imgsz", type=int, default=1280)
     ap.add_argument("--output", default=None, help="Optional annotated MP4")
     ap.add_argument("--events-json", default=None, help="Event JSON output path")

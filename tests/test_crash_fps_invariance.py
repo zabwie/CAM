@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from traffic_intel.crash_detector import CrashDetector
+from traffic_intel.incident.crash_detector import CrashDetector
 from traffic_intel.domain import Detection
 
 

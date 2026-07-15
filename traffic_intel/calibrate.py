@@ -30,7 +30,7 @@ from matplotlib.patches import Polygon
 # Reuse Calibration's compute_quality so the wizard and engine share
 # identical quality logic.
 try:
-    from .calibration import Calibration
+    from .motion.calibration import Calibration
 except ImportError:  # direct script execution
     from calibration import Calibration
 

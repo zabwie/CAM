@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "traffic-intel"
-version = "0.10.0"
+version = "0.12.0"
 description = "Camera-based traffic perception, speed estimation, and incident detection"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -24,6 +24,8 @@ traffic-intel-live = "traffic_intel.live:main"
 traffic-intel-validate-crashes = "traffic_intel.validate_crashes:main"
 traffic-intel-calibrate = "traffic_intel.calibrate:main"
 traffic-intel-doctor = "traffic_intel.doctor:main"
+traffic-intel-report = "traffic_intel.report:main"
+traffic-intel-dashboard = "traffic_intel.dashboard:main"
 
 [tool.setuptools.packages.find]
 include = ["traffic_intel*"]

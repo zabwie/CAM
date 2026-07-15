@@ -19,12 +19,12 @@ cap = cv2.VideoCapture('sample.mp4')
 cap.set(cv2.CAP_PROP_POS_FRAMES, 100)  # frame ~3 seconds in
 ret, frame = cap.read()
 if ret:
-    cv2.imwrite('ref_frame.jpg', frame)
+    cv2.imwrite('images/ref_frame.jpg', frame)
 cap.release()
 "
 
 # Run the calibration wizard on it
-python -m traffic_intel.calibrate --image ref_frame.jpg --output calib.json
+python -m traffic_intel.calibrate --image images/ref_frame.jpg --output calib.json
 ```
 
 ### Calibration wizard controls:
@@ -49,7 +49,7 @@ python -m traffic_intel.calibrate --image ref_frame.jpg --output calib.json
 2. Press **`h`** to compute homography — auto-assigns world coords (lane width 3.7m, segment length 25m)
 3. Adjust with `--lane-width` and `--segment-length` flags if different:
    ```bash
-   python -m traffic_intel.calibrate --image ref_frame.jpg --output calib.json --lane-width 3.7 --segment-length 25.0
+   python -m traffic_intel.calibrate --image images/ref_frame.jpg --output calib.json --lane-width 3.7 --segment-length 25.0
    ```
 4. Press **`r`** to switch to ROI mode, then click around the **drivable road area** to exclude fences/sidewalks
 5. Press **`s`** to save
@@ -111,8 +111,8 @@ print(e.process_video('sample.mp4', output_path='annotated.mp4'))
 
 | File | Purpose |
 |------|---------|
-| `CALIBRATION_HELP.md` | This file |
-| `validation/videos/` | Supplied crash-regression source clips |
-| `calib.json` | (to be replaced after calibration) |
-| `yolo11n.pt` | YOLO model (nano — fast but less accurate) |
+| `docs/CALIBRATION_HELP.md` | This file |
+| `videos/` | Supplied crash-regression source clips |
+| `calib.json` | Your calibration output |
+| `models/yolo11n.pt` | YOLO model (nano — fast but less accurate) |
 | `traffic_intel/` | Core engine code |

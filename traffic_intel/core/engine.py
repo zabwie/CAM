@@ -18,12 +18,12 @@ import supervision as sv
 from supervision.tracker.byte_tracker.core import ByteTrack
 from ultralytics import YOLO
 
-from .calibration import Calibration
-from .config import EngineConfig, SceneChangeConfig, TrackingConfig
-from .domain import Detection
+from ..config import EngineConfig, SceneChangeConfig, TrackingConfig
+from ..domain import Detection
+from ..motion.calibration import Calibration
+from ..motion.speed import RobustSpeedEstimator
 from .identity import CanonicalIdentityManager, RawTrackObservation
 from .scene import SceneChangeDetector
-from .speed import RobustSpeedEstimator
 from .tracking import TrackQualityGate
 
 PathLike = Union[str, Path]
@@ -39,7 +39,7 @@ class TrafficEngine:
 
     def __init__(
         self,
-        model_path: str = "yolo11n.pt",
+        model_path: str = "models/yolo11n.pt",
         calibration: Optional[Calibration] = None,
         confidence: Optional[float] = None,
         fps: float = 30.0,
@@ -119,6 +119,9 @@ class TrafficEngine:
         self.results: list[Detection] = []
         self.current_detections: list[Detection] = []
         self.frame_count = 0
+        self.current_capture_timestamp = 0.0
+        self.current_monotonic_timestamp = 0.0
+        self.current_vision_state = "UNKNOWN"
         self.last_scene_cut = False
         self.scene_warmup_remaining = self._warmup_frames()
 
@@ -126,11 +129,32 @@ class TrafficEngine:
     # Public processing API
     # ------------------------------------------------------------------
 
-    def process_frame(self, frame: np.ndarray) -> np.ndarray:
+    def process_frame(
+        self,
+        frame: np.ndarray,
+        *,
+        capture_timestamp: float | None = None,
+        monotonic_timestamp: float | None = None,
+        vision_state: str = "UNKNOWN",
+    ) -> np.ndarray:
         if frame is None or frame.size == 0:
             raise ValueError("frame must be a non-empty BGR image")
 
         self.frame_count += 1
+        default_timestamp = self.frame_count / self.fps
+        self.current_capture_timestamp = (
+            default_timestamp if capture_timestamp is None else float(capture_timestamp)
+        )
+        self.current_monotonic_timestamp = (
+            default_timestamp
+            if monotonic_timestamp is None
+            else float(monotonic_timestamp)
+        )
+        if not np.isfinite(
+            [self.current_capture_timestamp, self.current_monotonic_timestamp]
+        ).all():
+            raise ValueError("frame timestamps must be finite")
+        self.current_vision_state = str(vision_state or "UNKNOWN")
         self.current_detections = []
         if not self.retain_history:
             self.results.clear()
@@ -211,7 +235,10 @@ class TrafficEngine:
             self.current_detections.append(detection)
             self._draw_detection(annotated, detection)
 
-        self.speed_estimator.forget_stale(self.frame_count)
+        self.speed_estimator.forget_stale(
+            self.frame_count,
+            self.current_monotonic_timestamp,
+        )
         self.track_gate.forget_stale(self.frame_count)
         self.identity_manager.forget_stale(self.frame_count)
         return annotated
@@ -249,7 +276,14 @@ class TrafficEngine:
                 ok, frame = cap.read()
                 if not ok:
                     break
-                annotated = self.process_frame(frame)
+                media_timestamp = float(cap.get(cv2.CAP_PROP_POS_MSEC)) / 1000.0
+                if media_timestamp <= 0:
+                    media_timestamp = (count + 1) / fps
+                annotated = self.process_frame(
+                    frame,
+                    capture_timestamp=media_timestamp,
+                    monotonic_timestamp=media_timestamp,
+                )
                 if writer is not None:
                     writer.write(annotated)
                 count += 1
@@ -268,6 +302,9 @@ class TrafficEngine:
         self.results.clear()
         self.current_detections.clear()
         self.frame_count = 0
+        self.current_capture_timestamp = 0.0
+        self.current_monotonic_timestamp = 0.0
+        self.current_vision_state = "UNKNOWN"
         self.last_scene_cut = False
         self.tracker = self._build_tracker(self.fps)
         self.identity_manager.reset(reset_counter=True)
@@ -285,7 +322,8 @@ class TrafficEngine:
                 "frame", "track_id", "raw_track_id", "identity_generation",
                 "identity_confidence", "identity_lifecycle", "class", "confidence",
                 "x1", "y1", "x2", "y2", "speed_mph", "speed_valid",
-                "invalid_reason", "capture_ts", "meas_confidence",
+                "invalid_reason", "capture_ts", "monotonic_ts", "vision_state",
+                "meas_confidence",
                 "cal_confidence", "traj_confidence", "vis_confidence",
                 "zone_confidence", "track_quality",
             ])
@@ -295,7 +333,8 @@ class TrafficEngine:
                     f"{d.identity_confidence:.3f}", d.identity_lifecycle,
                     d.class_name, f"{d.confidence:.3f}",
                     *d.bbox, f"{d.speed:.1f}", int(d.speed_valid), d.invalid_reason,
-                    f"{d.capture_timestamp:.3f}", f"{d.measurement_confidence:.3f}",
+                    f"{d.capture_timestamp:.3f}", f"{d.monotonic_timestamp:.3f}",
+                    d.vision_state, f"{d.measurement_confidence:.3f}",
                     f"{d.cal_confidence:.3f}", f"{d.traj_confidence:.3f}",
                     f"{d.vis_confidence:.3f}", f"{d.zone_confidence:.3f}",
                     f"{d.track_quality:.3f}",
@@ -351,7 +390,11 @@ class TrafficEngine:
             else:
                 in_calibrated_zone = True
                 speed = self.speed_estimator.update(
-                    track_id, self.frame_count, world[0], world[1]
+                    track_id,
+                    self.frame_count,
+                    world[0],
+                    world[1],
+                    timestamp_s=self.current_monotonic_timestamp,
                 )
                 reason = (
                     "VALID" if speed is not None else self.speed_estimator.last_reason(track_id)
@@ -376,7 +419,9 @@ class TrafficEngine:
             traj_confidence=confidence["trajectory"],
             vis_confidence=confidence["visibility"],
             zone_confidence=confidence["zone"],
-            capture_timestamp=self.frame_count / self.fps,
+            capture_timestamp=self.current_capture_timestamp,
+            monotonic_timestamp=self.current_monotonic_timestamp,
+            vision_state=self.current_vision_state,
             track_quality=float(track_quality),
             track_confirmed=True,
             raw_track_id=int(raw_track_id),
@@ -525,7 +570,11 @@ class TrafficEngine:
         self, *, track_id: int, bbox_height: int, in_calibrated_zone: bool
     ) -> dict[str, float]:
         cal = self._calibration_confidence()
-        traj = self.speed_estimator.trajectory_confidence(track_id, self.frame_count)
+        traj = self.speed_estimator.trajectory_confidence(
+            track_id,
+            self.frame_count,
+            self.current_monotonic_timestamp,
+        )
         visibility = min(max(bbox_height, 0) / 50.0, 1.0)
         zone = 1.0 if in_calibrated_zone else 0.3
         overall = float(np.clip(
@@ -542,10 +591,16 @@ class TrafficEngine:
 
     @staticmethod
     def _resolve_model(model_path: str) -> str:
-        if model_path not in {"yolo11n.pt", "yolo11s.pt", "yolo11m.pt"}:
-            return model_path
-        coreml = model_path.replace(".pt", ".mlpackage")
-        return coreml if Path(coreml).exists() else model_path
+        KNOWN = {"yolo11n.pt", "yolo11s.pt", "yolo11m.pt",
+                 "models/yolo11n.pt", "models/yolo11s.pt", "models/yolo11m.pt"}
+        # Resolve bare names to models/ directory when it exists.
+        if model_path in KNOWN:
+            qualified = model_path if "/" in model_path else f"models/{model_path}"
+            coreml = qualified.replace(".pt", ".mlpackage")
+            if Path(coreml).exists():
+                return coreml
+            return qualified
+        return model_path
 
 
 __all__ = ["Calibration", "Detection", "EngineConfig", "TrafficEngine"]

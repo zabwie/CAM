@@ -9,6 +9,21 @@ BBox = Tuple[int, int, int, int]
 
 
 @dataclass(slots=True)
+class RawVehicleDetection:
+    """A detector-level vehicle observation before tracker trust gating.
+
+    Incident analysis uses these short-lived observations as supporting evidence
+    for occlusion/merge impacts where a real vehicle is visible to YOLO but
+    disappears before ByteTrack can promote it to a stable identity.
+    """
+
+    frame: int
+    class_name: str
+    confidence: float
+    bbox: BBox
+
+
+@dataclass(slots=True)
 class Detection:
     """A trusted canonical vehicle observation emitted by ``TrafficEngine``.
 
@@ -36,6 +51,8 @@ class Detection:
     vis_confidence: float = 0.0
     zone_confidence: float = 0.0
     capture_timestamp: float = 0.0
+    monotonic_timestamp: float = 0.0
+    vision_state: str = "UNKNOWN"
     track_quality: float = 1.0
     track_confirmed: bool = True
     raw_track_id: int | None = None
@@ -60,4 +77,4 @@ class Detection:
         return self.track_id if self.raw_track_id is None else self.raw_track_id
 
 
-__all__ = ["BBox", "Detection"]
+__all__ = ["BBox", "Detection", "RawVehicleDetection"]

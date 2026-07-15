@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .config import TrackingConfig
+from ..config import TrackingConfig
 
 
 @dataclass

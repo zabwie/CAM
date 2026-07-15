@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .speed import SpeedEstimatorConfig
+from .motion.speed import SpeedEstimatorConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,7 +66,7 @@ class SceneChangeConfig:
 
 @dataclass(frozen=True, slots=True)
 class EngineConfig:
-    model_path: str = "yolo11n.pt"
+    model_path: str = "models/yolo11n.pt"
     imgsz: int = 1280
     fps: float = 30.0
     retain_history: bool = True

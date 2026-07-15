@@ -22,16 +22,16 @@ import supervision as sv
 from supervision.tracker.byte_tracker.core import ByteTrack
 
 from traffic_intel.config import SceneChangeConfig, TrackingConfig
-from traffic_intel.crash_detector import CrashDetector
-from traffic_intel.crash_visuals import (
+from traffic_intel.core.identity import CanonicalIdentityManager, RawTrackObservation
+from traffic_intel.core.scene import SceneChangeDetector
+from traffic_intel.core.tracking import TrackQualityGate
+from traffic_intel.domain import Detection
+from traffic_intel.incident.crash_detector import CrashDetector
+from traffic_intel.incident.crash_visuals import (
     draw_crash_boxes,
     reset_crash_visuals,
     update_crash_visuals,
 )
-from traffic_intel.domain import Detection
-from traffic_intel.identity import CanonicalIdentityManager, RawTrackObservation
-from traffic_intel.scene import SceneChangeDetector
-from traffic_intel.tracking import TrackQualityGate
 
 VEHICLE_IDS = {2, 3, 5, 7}
 CLASS_NAMES = {2: "car", 3: "motorcycle", 5: "bus", 7: "truck"}
@@ -68,7 +68,7 @@ def _text_box(
 
 def render(name: str, output: Path, timeline_path: Path) -> dict:
     cache_path = ROOT / "validation" / "cached" / f"{name}_yolo640.json"
-    video_path = ROOT / "validation" / "videos" / f"{name}.mp4"
+    video_path = ROOT / "videos" / f"{name}.mp4"
     cache = json.loads(cache_path.read_text())
     fps = float(cache["fps"])
     cfg = TrackingConfig()

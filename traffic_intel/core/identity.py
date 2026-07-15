@@ -20,7 +20,9 @@ from typing import Iterable
 import cv2
 import numpy as np
 
-from .config import TrackingConfig
+from traffic_intel.config import TrackingConfig
+from traffic_intel.core.appearance import appearance_descriptor, appearance_similarity, normalise_hist
+from traffic_intel.core.geometry import box_center_size, center_size_box, robust_velocity, size_ratio
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,10 +116,44 @@ class CanonicalIdentityManager:
             return []
 
         descriptors = {
-            o.tracker_id: self._appearance_descriptor(image, o.bbox)
+            o.tracker_id: appearance_descriptor(image, o.bbox)
             for o in obs
         }
 
+        assignments, used_canonical, unmatched = self._preserve_mappings(obs, frame, descriptors)
+        candidates = self._build_stitch_candidates(unmatched, frame, descriptors, used_canonical)
+
+        # Global greedy assignment by best score.  Each raw/canonical identity
+        # can participate in at most one stitch in the frame.
+        proposals: list[tuple[float, int, int]] = []
+        for raw_id, rows in candidates.items():
+            if not rows:
+                continue
+            best_score, best_cid = rows[0]
+            second = rows[1][0] if len(rows) > 1 else 0.0
+            if best_score < self.config.identity_min_stitch_score:
+                continue
+            if best_score - second < self.config.identity_ambiguity_margin:
+                continue
+            proposals.append((best_score, raw_id, best_cid))
+        proposals.sort(reverse=True)
+
+        assignments, used_canonical = self._assign_stitches(
+            unmatched, frame, descriptors, proposals, assignments, used_canonical,
+        )
+        assignments = self._assign_remaining(
+            unmatched, frame, descriptors, assignments, used_canonical,
+        )
+
+        self.forget_stale(frame)
+        return [assignments[o.tracker_id] for o in obs]
+
+    def _preserve_mappings(
+        self,
+        obs: list,
+        frame: int,
+        descriptors: dict,
+    ) -> tuple[dict[int, IdentityAssignment], set[int], list]:
         assignments: dict[int, IdentityAssignment] = {}
         used_canonical: set[int] = set()
         # (observation, came_from_continuity_break, provisional_canonical_id)
@@ -175,6 +211,15 @@ class CanonicalIdentityManager:
             assignments[o.tracker_id] = assignment
             used_canonical.add(cid)
 
+        return assignments, used_canonical, unmatched
+
+    def _build_stitch_candidates(
+        self,
+        unmatched: list,
+        frame: int,
+        descriptors: dict,
+        used_canonical: set,
+    ) -> dict[int, list[tuple[float, int]]]:
         # Build conservative candidate matches for raw IDs that are new to the
         # tracker (or were detached after a continuity break).
         candidates: dict[int, list[tuple[float, int]]] = {}
@@ -203,22 +248,17 @@ class CanonicalIdentityManager:
                     rows.append((score, cid))
             rows.sort(reverse=True)
             candidates[o.tracker_id] = rows
+        return candidates
 
-        # Global greedy assignment by best score.  Each raw/canonical identity
-        # can participate in at most one stitch in the frame.
-        proposals: list[tuple[float, int, int]] = []
-        for raw_id, rows in candidates.items():
-            if not rows:
-                continue
-            best_score, best_cid = rows[0]
-            second = rows[1][0] if len(rows) > 1 else 0.0
-            if best_score < self.config.identity_min_stitch_score:
-                continue
-            if best_score - second < self.config.identity_ambiguity_margin:
-                continue
-            proposals.append((best_score, raw_id, best_cid))
-        proposals.sort(reverse=True)
-
+    def _assign_stitches(
+        self,
+        unmatched: list,
+        frame: int,
+        descriptors: dict,
+        proposals: list,
+        assignments: dict[int, IdentityAssignment],
+        used_canonical: set[int],
+    ) -> tuple[dict[int, IdentityAssignment], set[int]]:
         stitched_raw: set[int] = set()
         for score, raw_id, cid in proposals:
             if raw_id in stitched_raw or cid in used_canonical:
@@ -259,7 +299,16 @@ class CanonicalIdentityManager:
                 "new_tracker_id": int(raw_id),
                 "score": float(score),
             })
+        return assignments, used_canonical
 
+    def _assign_remaining(
+        self,
+        unmatched: list,
+        frame: int,
+        descriptors: dict,
+        assignments: dict[int, IdentityAssignment],
+        used_canonical: set[int],
+    ) -> dict[int, IdentityAssignment]:
         # Anything still unmatched becomes a new physical identity.  This is
         # intentionally safer than forcing a weak/ambiguous re-identification.
         for o, was_break, provisional_cid in unmatched:
@@ -299,9 +348,7 @@ class CanonicalIdentityManager:
             )
             assignments[o.tracker_id] = assignment
             used_canonical.add(state.canonical_id)
-
-        self.forget_stale(frame)
-        return [assignments[o.tracker_id] for o in obs]
+        return assignments
 
     def forget_stale(self, current_frame: int) -> None:
         stale_frames = max(1, int(round(self.config.identity_state_seconds * self.fps)))
@@ -315,10 +362,6 @@ class CanonicalIdentityManager:
             if self._raw_to_canonical.get(state.current_tracker_id) == cid:
                 self._raw_to_canonical.pop(state.current_tracker_id, None)
 
-    @property
-    def active_identity_count(self) -> int:
-        return len(self._states)
-
     def _new_state(
         self,
         frame: int,
@@ -328,7 +371,7 @@ class CanonicalIdentityManager:
         cid = self._next_canonical_id
         self._next_canonical_id += 1
         box = np.asarray(observation.bbox, dtype=np.float64)
-        center, size = self._box_center_size(box)
+        center, size = box_center_size(box)
         state = _IdentityState(
             canonical_id=cid,
             first_frame=int(frame),
@@ -356,7 +399,7 @@ class CanonicalIdentityManager:
         discontinuity: bool,
     ) -> IdentityAssignment:
         box = np.asarray(observation.bbox, dtype=np.float64)
-        center, size = self._box_center_size(box)
+        center, size = box_center_size(box)
         gap = max(1, int(frame - state.last_frame))
 
         if state.filtered_center is None or state.filtered_size is None:
@@ -404,7 +447,7 @@ class CanonicalIdentityManager:
                 # Appearance changes slowly; using a conservative EMA prevents
                 # a brief occlusion or glare from rewriting the vehicle model.
                 beta = 0.10 if state.appearance_samples >= 4 else 0.22
-                state.appearance = self._normalise_hist(
+                state.appearance = normalise_hist(
                     (1.0 - beta) * state.appearance + beta * descriptor
                 )
             state.appearance_samples += 1
@@ -422,7 +465,7 @@ class CanonicalIdentityManager:
             identity_confidence=state.last_identity_confidence,
             lifecycle=lifecycle,
             raw_bbox=box.astype(np.float32),
-            filtered_bbox=self._center_size_box(
+            filtered_bbox=center_size_box(
                 state.filtered_center, state.filtered_size
             ).astype(np.float32),
             provisional=provisional,
@@ -439,13 +482,13 @@ class CanonicalIdentityManager:
     ) -> tuple[float, bool]:
         gap = max(1, frame - state.last_frame)
         pred_center, pred_size = self._predict(state, gap)
-        center, size = self._box_center_size(bbox)
+        center, size = box_center_size(bbox)
         scale = max(20.0, float(np.hypot(*pred_size)))
         error = float(np.linalg.norm(center - pred_center)) / scale
-        area_ratio = self._size_ratio(pred_size, size)
+        area_ratio = size_ratio(pred_size, size)
         motion_score = exp(-0.5 * (error / 0.95) ** 2)
         size_score = exp(-abs(log(max(area_ratio, 1e-6))) / 0.80)
-        appearance = self._appearance_similarity(state.appearance, descriptor)
+        appearance = appearance_similarity(state.appearance, descriptor)
         score = 0.60 * motion_score + 0.25 * size_score + 0.15 * appearance
 
         severe_break = bool(
@@ -478,7 +521,7 @@ class CanonicalIdentityManager:
             # return before canonical identity is reassigned.
             return None
         pred_center, pred_size = self._predict(state, gap)
-        center, size = self._box_center_size(bbox)
+        center, size = box_center_size(bbox)
         scale = max(18.0, float(np.hypot(*pred_size)))
         error = float(np.linalg.norm(center - pred_center)) / scale
         # Prediction uncertainty grows during a gap.  The hard gate therefore
@@ -489,11 +532,11 @@ class CanonicalIdentityManager:
         if error > max_error:
             return None
 
-        area_ratio = self._size_ratio(pred_size, size)
+        area_ratio = size_ratio(pred_size, size)
         if area_ratio > self.config.identity_max_size_ratio:
             return None
 
-        appearance = self._appearance_similarity(state.appearance, descriptor)
+        appearance = appearance_similarity(state.appearance, descriptor)
         appearance_available = (
             state.appearance is not None
             and descriptor is not None
@@ -512,7 +555,7 @@ class CanonicalIdentityManager:
             # agreement before preserving identity across that scale jump.
             return None
 
-        source_velocity = self._robust_velocity(state.history)
+        source_velocity = robust_velocity(state.history)
         source_speed_norm = float(np.linalg.norm(source_velocity)) / max(
             18.0, float(np.hypot(*pred_size))
         )
@@ -560,49 +603,9 @@ class CanonicalIdentityManager:
         # Blend the state filter velocity with a robust trajectory slope.  This
         # makes short gaps predictable without allowing one noisy last frame to
         # fling the expected position across the image.
-        robust_velocity = self._robust_velocity(state.history)
-        velocity = 0.55 * state.velocity + 0.45 * robust_velocity
+        robust = robust_velocity(state.history)
+        velocity = 0.55 * state.velocity + 0.45 * robust
         return state.filtered_center + velocity * gap, state.filtered_size.copy()
-
-    @staticmethod
-    def _robust_velocity(
-        history: deque[tuple[int, float, float, float, float]],
-    ) -> np.ndarray:
-        if len(history) < 3:
-            return np.zeros(2, dtype=np.float64)
-        rows = list(history)[-10:]
-        velocities = []
-        for a, b in zip(rows[:-1], rows[1:]):
-            df = b[0] - a[0]
-            if df <= 0:
-                continue
-            velocities.append([(b[1] - a[1]) / df, (b[2] - a[2]) / df])
-        if not velocities:
-            return np.zeros(2, dtype=np.float64)
-        return np.median(np.asarray(velocities, dtype=np.float64), axis=0)
-
-    @staticmethod
-    def _box_center_size(bbox: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        box = np.asarray(bbox, dtype=np.float64)
-        center = np.array([(box[0] + box[2]) * 0.5, (box[1] + box[3]) * 0.5])
-        size = np.array([max(1.0, box[2] - box[0]), max(1.0, box[3] - box[1])])
-        return center, size
-
-    @staticmethod
-    def _center_size_box(center: np.ndarray, size: np.ndarray) -> np.ndarray:
-        half = size * 0.5
-        return np.array([
-            center[0] - half[0],
-            center[1] - half[1],
-            center[0] + half[0],
-            center[1] + half[1],
-        ], dtype=np.float64)
-
-    @staticmethod
-    def _size_ratio(a: np.ndarray, b: np.ndarray) -> float:
-        area_a = max(1.0, float(a[0] * a[1]))
-        area_b = max(1.0, float(b[0] * b[1]))
-        return max(area_a, area_b) / min(area_a, area_b)
 
     def _class_compatibility(self, state: _IdentityState, class_id: int) -> float:
         if not state.class_scores:
@@ -616,61 +619,3 @@ class CanonicalIdentityManager:
         if stable in road_heavy and class_id in road_heavy:
             return 0.78
         return 0.25
-
-    @staticmethod
-    def _appearance_descriptor(
-        image: np.ndarray | None,
-        bbox: np.ndarray,
-    ) -> np.ndarray | None:
-        if image is None or image.size == 0:
-            return None
-        h, w = image.shape[:2]
-        x1, y1, x2, y2 = map(float, bbox)
-        # Use an inner crop to reduce background contamination around loose
-        # detector boxes, especially for distant vehicles.
-        bw, bh = x2 - x1, y2 - y1
-        x1 += 0.10 * bw
-        x2 -= 0.10 * bw
-        y1 += 0.10 * bh
-        y2 -= 0.08 * bh
-        ix1, iy1 = max(0, int(round(x1))), max(0, int(round(y1)))
-        ix2, iy2 = min(w, int(round(x2))), min(h, int(round(y2)))
-        if ix2 - ix1 < 10 or iy2 - iy1 < 8 or (ix2 - ix1) * (iy2 - iy1) < 180:
-            return None
-        crop = image[iy1:iy2, ix1:ix2]
-        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-        # Ignore the darkest pixels, which are often shadows/windows rather
-        # than stable body colour.  Histogram remains robust to crop resizing.
-        mask = cv2.inRange(hsv, np.array([0, 18, 24]), np.array([179, 255, 255]))
-        hist = cv2.calcHist([hsv], [0, 1], mask, [18, 8], [0, 180, 0, 256]).astype(np.float32)
-        if float(hist.sum()) <= 1e-6:
-            hist = cv2.calcHist([hsv], [0, 1], None, [18, 8], [0, 180, 0, 256]).astype(np.float32)
-        return CanonicalIdentityManager._normalise_hist(hist.reshape(-1))
-
-    @staticmethod
-    def _normalise_hist(hist: np.ndarray) -> np.ndarray:
-        arr = np.asarray(hist, dtype=np.float32).reshape(-1)
-        total = float(arr.sum())
-        if total <= 1e-9:
-            return arr
-        return arr / total
-
-    @staticmethod
-    def _appearance_similarity(a: np.ndarray | None, b: np.ndarray | None) -> float:
-        if a is None or b is None:
-            return 0.55  # neutral rather than punitive when appearance is absent
-        # Bhattacharyya distance is 0 for identical distributions and tends
-        # toward 1 as they diverge.
-        distance = float(cv2.compareHist(
-            np.asarray(a, dtype=np.float32),
-            np.asarray(b, dtype=np.float32),
-            cv2.HISTCMP_BHATTACHARYYA,
-        ))
-        return float(np.clip(1.0 - distance, 0.0, 1.0))
-
-
-__all__ = [
-    "CanonicalIdentityManager",
-    "IdentityAssignment",
-    "RawTrackObservation",
-]

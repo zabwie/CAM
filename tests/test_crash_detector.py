@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from traffic_intel.crash_detector import CrashDetector
-from traffic_intel.engine import Detection
+from traffic_intel.domain import Detection
+from traffic_intel.incident.crash_detector import CrashDetector
 
 
 def _det(frame: int, tid: int, cx: float, cy: float, w: float = 60, h: float = 40) -> Detection:

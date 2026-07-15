@@ -16,7 +16,7 @@ from .calibration import Calibration
 
 def _args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Check Traffic Intelligence runtime readiness")
-    parser.add_argument("--model", default="yolo11n.pt")
+    parser.add_argument("--model", default="models/yolo11n.pt")
     parser.add_argument("--calibration", default=None)
     return parser.parse_args()
 

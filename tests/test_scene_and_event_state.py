@@ -4,8 +4,8 @@ from pathlib import Path
 
 import numpy as np
 
-from traffic_intel.engine import TrafficEngine
-from traffic_intel.event_recorder import RollingSegmentBuffer, _Segment
+from traffic_intel.core.engine import TrafficEngine
+from traffic_intel.recording.event_recorder import RollingSegmentBuffer, _Segment
 
 
 def test_scene_cut_ignores_local_motion_but_resets_on_global_change() -> None:
