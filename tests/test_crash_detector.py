@@ -128,3 +128,32 @@ def test_weak_vehicle_disappearance_without_survivor_expansion_is_not_crash() ->
             raw.append(_Raw(frame, 0.30, (350, 270, 415, 330)))
         events.extend(detector.update(frame, [a], frame=None, raw_detections=raw))
     assert [e for e in events if e.reason == "merge_occlusion_impact"] == []
+
+
+
+
+
+def test_aftermath_contributes_to_crash_scoring() -> None:
+    """After a collision event the aftermath score component should be
+    positive for the involved tracks."""
+    detector = CrashDetector(fps=30)
+    events = []
+    for frame in range(1, 95):
+        ax, ay = 200 + 4 * frame, 300
+        bx, by = 540 - 3 * frame, 300
+        if frame >= 43:
+            bx = (540 - 3 * 42) + (frame - 42)
+            by = 300 + 5 * (frame - 42)
+        events.extend(
+            detector.update(
+                frame,
+                [_det(frame, 1, ax, ay), _det(frame, 2, bx, by)],
+                frame=None,
+            )
+        )
+    assert len(events) == 1
+    ev = events[0]
+    assert "aftermath" in ev.evidence
+    assert ev.evidence["aftermath"] >= 0.0
+    # Aftermath is a supporting signal, not a standalone event.
+    assert ev.reason == "collision"

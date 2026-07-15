@@ -314,16 +314,33 @@ class PairCrashFSM:
         if not recent:
             return None
 
+        ta = self._tracks.get(a)
+        tb = self._tracks.get(b)
+        if ta is None or tb is None:
+            return None
+
+        signals = self._compute_pair_signals(key, ps, fc, recent, pre_window, ta, tb)
+        if signals is None:
+            return None
+
+        self._advance_event_pre_trigger(ps, fc, signals)
+
+        evidence = self._evaluate_impact_evidence(ps, fc, recent, pre_window, signals, ta, tb)
+        score = self._compute_crash_score(signals, evidence)
+
+        result = self._build_crash_result(key, ps, fc, signals, evidence, score)
+        if result is not None:
+            return result
+
+        self._advance_timeout_transitions(ps, fc, score, signals)
+        return None
+
+    def _compute_pair_signals(self, key, ps, fc, recent, pre_window, ta, tb):
         risk_peak = max(m.risk for m in pre_window)
         risk_persist = sum(m.risk >= 0.40 for m in pre_window)
         contact_peak = max(m.contact for m in recent)
         min_gap_metric = min(recent, key=lambda m: m.gap_norm)
         near_contact = min_gap_metric.gap_norm <= self.config.near_gap_norm
-
-        ta = self._tracks.get(a)
-        tb = self._tracks.get(b)
-        if ta is None or tb is None:
-            return None
 
         sync_frames = max(2, self._frames(self.config.sync_seconds))
         age_a = fc - ta.last_disc_frame
@@ -391,20 +408,49 @@ class PairCrashFSM:
         flow = ps.flow_score if fc - ps.flow_frame <= max(3, self._frames(self.config.flow_fresh_seconds)) else 0.0
         aftermath = self._aftermath_score(key, min_gap_metric.frame)
 
+        return {
+            "risk_peak": risk_peak,
+            "risk_persist": risk_persist,
+            "contact_peak": contact_peak,
+            "min_gap_metric": min_gap_metric,
+            "near_contact": near_contact,
+            "disc_a": disc_a,
+            "disc_b": disc_b,
+            "mature_a": mature_a,
+            "mature_b": mature_b,
+            "physical_a": physical_a,
+            "physical_b": physical_b,
+            "speed_impulse_a": speed_impulse_a,
+            "speed_impulse_b": speed_impulse_b,
+            "pair_relative_dv": pair_relative_dv,
+            "delta_v_cosine": delta_v_cosine,
+            "pre_heading_cosine": pre_heading_cosine,
+            "common_braking_motion": common_braking_motion,
+            "directional_sync": directional_sync,
+            "speed_only_sync": speed_only_sync,
+            "synchronized": synchronized,
+            "kinematic": kinematic,
+            "contact_dropout": contact_dropout,
+            "flow": flow,
+            "aftermath": aftermath,
+        }
+
+    def _advance_event_pre_trigger(self, ps, fc, signals):
         if ps.event == PairEvent.NORMAL:
-            if risk_persist >= 3 and risk_peak >= 0.40:
+            if signals["risk_persist"] >= 3 and signals["risk_peak"] >= 0.40:
                 ps.event = PairEvent.CONVERGING
                 ps.event_frame = fc
 
         if ps.event in (PairEvent.NORMAL, PairEvent.CONVERGING):
-            if near_contact and contact_peak >= 0.28 and kinematic >= 0.28:
+            if signals["near_contact"] and signals["contact_peak"] >= 0.28 and signals["kinematic"] >= 0.28:
                 ps.event = PairEvent.IMPACT_CANDIDATE
                 ps.event_frame = fc
 
+    def _evaluate_impact_evidence(self, ps, fc, recent, pre_window, signals, ta, tb):
         impulse_frames = []
-        if physical_a or speed_impulse_a:
+        if signals["physical_a"] or signals["speed_impulse_a"]:
             impulse_frames.append(ta.last_disc_frame)
-        if physical_b or speed_impulse_b:
+        if signals["physical_b"] or signals["speed_impulse_b"]:
             impulse_frames.append(tb.last_disc_frame)
         impact_frame_hint = max(impulse_frames) if impulse_frames else fc
         align_frames = max(3, self._frames(self.config.impact_alignment_seconds))
@@ -432,93 +478,113 @@ class PairCrashFSM:
         recent_contact_onset = -2 <= contact_age <= max(3, self._frames(self.config.recent_contact_onset_seconds))
 
         pair_impact_evidence = (
-            pair_relative_dv >= self.config.min_pair_relative_dv_norm
+            signals["pair_relative_dv"] >= self.config.min_pair_relative_dv_norm
             or recent_contact_onset
-            or contact_dropout
-            or flow >= 0.25
+            or signals["contact_dropout"]
+            or signals["flow"] >= 0.25
         )
         stale_contact = contact_age > max(
             3, self._frames(self.config.recent_contact_onset_seconds)
         )
-        common_braking = common_braking_motion and stale_contact
-        if stale_contact and not contact_dropout and flow < 0.25:
+        common_braking = signals["common_braking_motion"] and stale_contact
+        if stale_contact and not signals["contact_dropout"] and signals["flow"] < 0.25:
             # Long-standing 2-D box overlap is common in traffic queues and
             # perspective compression.  It is not fresh collision evidence.
             pair_impact_evidence = (
-                pair_relative_dv >= self.config.stale_contact_relative_dv_norm
+                signals["pair_relative_dv"] >= self.config.stale_contact_relative_dv_norm
             )
 
         geometry_ok = (
-            near_contact
+            signals["near_contact"]
             and contact_aligned
             and depth_ok
-            and (contact_peak >= 0.28 or (risk_peak >= 0.62 and min_gap_metric.gap_norm <= 0.80))
-            and (risk_peak >= 0.35 or contact_peak >= 0.70)
+            and (signals["contact_peak"] >= 0.28 or (signals["risk_peak"] >= 0.62 and signals["min_gap_metric"].gap_norm <= 0.80))
+            and (signals["risk_peak"] >= 0.35 or signals["contact_peak"] >= 0.70)
         )
         kinematics_ok = (
             (
-                physical_a
-                or physical_b
-                or directional_sync
-                or speed_only_sync
+                signals["physical_a"]
+                or signals["physical_b"]
+                or signals["directional_sync"]
+                or signals["speed_only_sync"]
             )
             and pair_impact_evidence
             and not common_braking
         )
 
+        return {
+            "contact_aligned": contact_aligned,
+            "depth_ok": depth_ok,
+            "best_depth": best_depth,
+            "best_anchor": best_anchor,
+            "contact_age": contact_age,
+            "recent_contact_onset": recent_contact_onset,
+            "pair_impact_evidence": pair_impact_evidence,
+            "stale_contact": stale_contact,
+            "common_braking": common_braking,
+            "geometry_ok": geometry_ok,
+            "kinematics_ok": kinematics_ok,
+        }
+
+    def _compute_crash_score(self, signals, evidence):
         score = (
-            0.31 * contact_peak
-            + 0.22 * risk_peak
-            + 0.38 * kinematic
-            + 0.03 * flow
-            + 0.06 * aftermath
+            0.31 * signals["contact_peak"]
+            + 0.22 * signals["risk_peak"]
+            + 0.38 * signals["kinematic"]
+            + 0.03 * signals["flow"]
+            + 0.06 * signals["aftermath"]
         )
-        if synchronized:
+        if signals["synchronized"]:
             score += 0.05
-        elif physical_a or physical_b:
+        elif signals["physical_a"] or signals["physical_b"]:
             score += 0.06
         score = float(np.clip(score, 0.0, 1.0))
+        return score
 
+    def _build_crash_result(self, key, ps, fc, signals, evidence, score):
         debounce = self._frames(self.config.pair_debounce_seconds)
         claimed = any(self._claimed_until.get(tid, -1) >= fc for tid in key)
         can_trigger = fc - ps.last_trigger_frame >= debounce and not claimed
 
-        if geometry_ok and kinematics_ok and can_trigger and score >= getattr(self.config, 'impact_threshold', 0.64):
+        if evidence["geometry_ok"] and evidence["kinematics_ok"] and can_trigger and score >= getattr(self.config, 'impact_threshold', 0.64):
             ps.event = PairEvent.CRASH_CONFIRMED
             ps.event_frame = fc
             ps.last_trigger_frame = fc
             lock = self._frames(self.config.shared_track_lock_seconds)
+            a, b = key
             self._claimed_until[a] = fc + lock
             self._claimed_until[b] = fc + lock
 
+            ta = self._tracks.get(a)
+            tb = self._tracks.get(b)
             physical_frames = []
-            if physical_a or speed_impulse_a:
+            if signals["physical_a"] or signals["speed_impulse_a"]:
                 physical_frames.append(ta.last_disc_frame)
-            if physical_b or speed_impulse_b:
+            if signals["physical_b"] or signals["speed_impulse_b"]:
                 physical_frames.append(tb.last_disc_frame)
-            impact_frame = max(physical_frames) if physical_frames else min_gap_metric.frame
-            evidence = {
-                "contact": round(contact_peak, 4),
-                "interaction_risk": round(risk_peak, 4),
-                "kinematic": round(kinematic, 4),
-                "flow": round(flow, 4),
-                "aftermath": round(aftermath, 4),
-                "gap_norm": round(min_gap_metric.gap_norm, 4),
-                "disc_a": round(disc_a, 4),
-                "disc_b": round(disc_b, 4),
-                "physical_a": float(physical_a),
-                "physical_b": float(physical_b),
-                "depth_consistency": round(best_depth, 4),
-                "anchor_distance": round(best_anchor, 4),
-                "contact_aligned": float(contact_aligned),
-                "mature_a": float(mature_a),
-                "mature_b": float(mature_b),
-                "speed_only_sync": float(speed_only_sync),
-                "contact_age_frames": float(contact_age),
-                "pair_relative_dv": round(pair_relative_dv, 4),
-                "delta_v_cosine": round(delta_v_cosine, 4),
-                "pre_heading_cosine": round(pre_heading_cosine, 4),
-                "common_braking": float(common_braking),
+            impact_frame = max(physical_frames) if physical_frames else signals["min_gap_metric"].frame
+            evidence_dict = {
+                "contact": round(signals["contact_peak"], 4),
+                "interaction_risk": round(signals["risk_peak"], 4),
+                "kinematic": round(signals["kinematic"], 4),
+                "flow": round(signals["flow"], 4),
+                "aftermath": round(signals["aftermath"], 4),
+                "gap_norm": round(signals["min_gap_metric"].gap_norm, 4),
+                "disc_a": round(signals["disc_a"], 4),
+                "disc_b": round(signals["disc_b"], 4),
+                "physical_a": float(signals["physical_a"]),
+                "physical_b": float(signals["physical_b"]),
+                "depth_consistency": round(evidence["best_depth"], 4),
+                "anchor_distance": round(evidence["best_anchor"], 4),
+                "contact_aligned": float(evidence["contact_aligned"]),
+                "mature_a": float(signals["mature_a"]),
+                "mature_b": float(signals["mature_b"]),
+                "speed_only_sync": float(signals["speed_only_sync"]),
+                "contact_age_frames": float(evidence["contact_age"]),
+                "pair_relative_dv": round(signals["pair_relative_dv"], 4),
+                "delta_v_cosine": round(signals["delta_v_cosine"], 4),
+                "pre_heading_cosine": round(signals["pre_heading_cosine"], 4),
+                "common_braking": float(evidence["common_braking"]),
             }
             involved_bboxes = {}
             for tid in key:
@@ -530,25 +596,28 @@ class PairCrashFSM:
                     )
                     involved_bboxes[tid] = tuple(map(float, nearest.bbox))
 
-            sync_text = "synchronized impulses" if synchronized else "contact-coupled impulse"
+            sync_text = "synchronized impulses" if signals["synchronized"] else "contact-coupled impulse"
             return {
                 "type": "crash",
                 "score": float(score),
                 "reason": "collision",
                 "description": (
                     f"Tracks #{a} and #{b}: {sync_text}, "
-                    f"contact={contact_peak:.2f}, risk={risk_peak:.2f}"
+                    f"contact={signals['contact_peak']:.2f}, risk={signals['risk_peak']:.2f}"
                 ),
                 "trigger_frame": int(impact_frame),
                 "detected_frame": int(fc),
                 "involved_tracks": [a, b],
-                "evidence": evidence,
+                "evidence": evidence_dict,
                 "involved_bboxes": involved_bboxes,
             }
 
+        return None
+
+    def _advance_timeout_transitions(self, ps, fc, score, signals):
         # State transition cleanup
         if ps.event == PairEvent.CONVERGING:
-            if fc - ps.event_frame > self._frames(self.config.converging_timeout_seconds) and risk_peak < 0.25:
+            if fc - ps.event_frame > self._frames(self.config.converging_timeout_seconds) and signals["risk_peak"] < 0.25:
                 ps.event = PairEvent.NEAR_MISS
                 ps.event_frame = fc
         elif ps.event == PairEvent.IMPACT_CANDIDATE:
@@ -563,8 +632,6 @@ class PairCrashFSM:
             if fc - ps.event_frame > self._frames(self.config.near_miss_timeout_seconds):
                 ps.event = PairEvent.NORMAL
                 ps.event_frame = fc
-
-        return None
 
     def _aftermath_score(self, key: tuple[int, int], impact_frame: int) -> float:
         """Supporting evidence only; never creates an event by itself."""

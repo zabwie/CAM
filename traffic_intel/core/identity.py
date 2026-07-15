@@ -120,6 +120,40 @@ class CanonicalIdentityManager:
             for o in obs
         }
 
+        assignments, used_canonical, unmatched = self._preserve_mappings(obs, frame, descriptors)
+        candidates = self._build_stitch_candidates(unmatched, frame, descriptors, used_canonical)
+
+        # Global greedy assignment by best score.  Each raw/canonical identity
+        # can participate in at most one stitch in the frame.
+        proposals: list[tuple[float, int, int]] = []
+        for raw_id, rows in candidates.items():
+            if not rows:
+                continue
+            best_score, best_cid = rows[0]
+            second = rows[1][0] if len(rows) > 1 else 0.0
+            if best_score < self.config.identity_min_stitch_score:
+                continue
+            if best_score - second < self.config.identity_ambiguity_margin:
+                continue
+            proposals.append((best_score, raw_id, best_cid))
+        proposals.sort(reverse=True)
+
+        assignments, used_canonical = self._assign_stitches(
+            unmatched, frame, descriptors, proposals, assignments, used_canonical,
+        )
+        assignments = self._assign_remaining(
+            unmatched, frame, descriptors, assignments, used_canonical,
+        )
+
+        self.forget_stale(frame)
+        return [assignments[o.tracker_id] for o in obs]
+
+    def _preserve_mappings(
+        self,
+        obs: list,
+        frame: int,
+        descriptors: dict,
+    ) -> tuple[dict[int, IdentityAssignment], set[int], list]:
         assignments: dict[int, IdentityAssignment] = {}
         used_canonical: set[int] = set()
         # (observation, came_from_continuity_break, provisional_canonical_id)
@@ -177,6 +211,15 @@ class CanonicalIdentityManager:
             assignments[o.tracker_id] = assignment
             used_canonical.add(cid)
 
+        return assignments, used_canonical, unmatched
+
+    def _build_stitch_candidates(
+        self,
+        unmatched: list,
+        frame: int,
+        descriptors: dict,
+        used_canonical: set,
+    ) -> dict[int, list[tuple[float, int]]]:
         # Build conservative candidate matches for raw IDs that are new to the
         # tracker (or were detached after a continuity break).
         candidates: dict[int, list[tuple[float, int]]] = {}
@@ -205,22 +248,17 @@ class CanonicalIdentityManager:
                     rows.append((score, cid))
             rows.sort(reverse=True)
             candidates[o.tracker_id] = rows
+        return candidates
 
-        # Global greedy assignment by best score.  Each raw/canonical identity
-        # can participate in at most one stitch in the frame.
-        proposals: list[tuple[float, int, int]] = []
-        for raw_id, rows in candidates.items():
-            if not rows:
-                continue
-            best_score, best_cid = rows[0]
-            second = rows[1][0] if len(rows) > 1 else 0.0
-            if best_score < self.config.identity_min_stitch_score:
-                continue
-            if best_score - second < self.config.identity_ambiguity_margin:
-                continue
-            proposals.append((best_score, raw_id, best_cid))
-        proposals.sort(reverse=True)
-
+    def _assign_stitches(
+        self,
+        unmatched: list,
+        frame: int,
+        descriptors: dict,
+        proposals: list,
+        assignments: dict[int, IdentityAssignment],
+        used_canonical: set[int],
+    ) -> tuple[dict[int, IdentityAssignment], set[int]]:
         stitched_raw: set[int] = set()
         for score, raw_id, cid in proposals:
             if raw_id in stitched_raw or cid in used_canonical:
@@ -261,7 +299,16 @@ class CanonicalIdentityManager:
                 "new_tracker_id": int(raw_id),
                 "score": float(score),
             })
+        return assignments, used_canonical
 
+    def _assign_remaining(
+        self,
+        unmatched: list,
+        frame: int,
+        descriptors: dict,
+        assignments: dict[int, IdentityAssignment],
+        used_canonical: set[int],
+    ) -> dict[int, IdentityAssignment]:
         # Anything still unmatched becomes a new physical identity.  This is
         # intentionally safer than forcing a weak/ambiguous re-identification.
         for o, was_break, provisional_cid in unmatched:
@@ -301,9 +348,7 @@ class CanonicalIdentityManager:
             )
             assignments[o.tracker_id] = assignment
             used_canonical.add(state.canonical_id)
-
-        self.forget_stale(frame)
-        return [assignments[o.tracker_id] for o in obs]
+        return assignments
 
     def forget_stale(self, current_frame: int) -> None:
         stale_frames = max(1, int(round(self.config.identity_state_seconds * self.fps)))

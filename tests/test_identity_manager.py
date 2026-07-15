@@ -150,3 +150,33 @@ def test_static_false_track_does_not_absorb_relocated_moving_vehicle() -> None:
 
     assert new.canonical_id != old.canonical_id
     assert new.lifecycle == "NEW"
+
+
+def test_provisional_identity_re_evaluated_against_dormant() -> None:
+    """A young provisional identity is held open for re-evaluation against older
+    dormant vehicles rather than being immediately accepted."""
+    cfg = TrackingConfig(
+        identity_min_stitch_score=0.58,
+        identity_provisional_hits=4,
+        identity_min_stitch_gap_seconds=0.10,
+    )
+    manager = CanonicalIdentityManager(fps=30, config=cfg)
+
+    # Dormant vehicle established at frame 1.
+    dormant = manager.assign_batch(frame=1, observations=[_obs(10, 200, 220)])[0]
+
+    # Frame 3: new raw ID 20 appears far from the dormant.  Gap = 2 frames,
+    # which is below min_stitch_gap (3 frames at 30 FPS), so stitch is
+    # blocked.  A separate provisional identity is created.
+    provisional = manager.assign_batch(frame=3, observations=[_obs(20, 100, 100)])[0]
+    assert provisional.canonical_id != dormant.canonical_id
+    assert provisional.lifecycle == "NEW"
+
+    # Frame 6: same raw ID 20 returns at the far position.  The provisional
+    # identity is still young (< 4 hits) so it enters the unmatched/re-evaluation
+    # path in _preserve_mappings.  The dormant stitch attempt is gated by
+    # _stitch_score — the prediction error from (200,220) → (100,100) over
+    # 5 frames exceeds max_prediction_error, so it stays separate.
+    continued = manager.assign_batch(frame=6, observations=[_obs(20, 100, 100)])[0]
+    assert continued.canonical_id == provisional.canonical_id
+    assert continued.lifecycle in ("CONTINUING", "NEW")
